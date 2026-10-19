@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@geotab/zenith/dist/button/button";
-import { summarize, scoreSeries, ruleBreakdown, bucketIndex, fmtScore, fmtDistance, scoreUnitLabel } from "../model.js";
+import { summarize, scoreSeries, ruleBreakdown, fmtScore, fmtDelta, fmtDistance, fmtRate, rateUnitLabel } from "../model.js";
 import { driverLabel } from "../api.js";
 import { BarTrend, HBar, Trend, BandPill } from "./Charts.jsx";
 
-/** Side panel: one vehicle or driver — trend, rule mix, and the underlying events. */
-export function Detail({ kind, id, config, periods, data, refData, session, onClose }) {
+/** Side panel: one vehicle or driver — trend, rule mix, and the underlying events (with Dismiss). */
+export function Detail({ kind, id, config, periods, data, refData, session, onClose, onDismiss }) {
     const n = periods.length;
     const [periodIdx, setPeriodIdx] = useState(n - 1);
+    const [confirmId, setConfirmId] = useState(null);
+    const [busyId, setBusyId] = useState(null);
     useEffect(() => { setPeriodIdx(n - 1); }, [id, n]);
     useEffect(() => {
         const onKey = e => { if (e.key === "Escape") onClose(); };
@@ -34,13 +36,18 @@ export function Detail({ kind, id, config, periods, data, refData, session, onCl
     }, [data, kind, id, periods, periodIdx, ruleNames]);
 
     if (!series || !sum) return null;
-    const maxPts = Math.max(0, ...rules.map(r => r.currentPoints));
+    const maxImpact = Math.max(0, ...rules.map(r => r.impact));
     const p = periods[periodIdx];
     const periodCounts = series.counts[periodIdx] || {};
 
+    const dismiss = async e => {
+        setBusyId(e.id);
+        try { await onDismiss(e); } finally { setBusyId(null); setConfirmId(null); }
+    };
+
     return (
         <div className="fi-drawer-backdrop" onClick={onClose}>
-            <aside className="fi-drawer" onClick={e => e.stopPropagation()} role="dialog" aria-label={`${subjectName} detail`}>
+            <aside className="fi-drawer" onClick={ev => ev.stopPropagation()} role="dialog" aria-label={`${subjectName} detail`}>
                 <header className="fi-drawer-head">
                     <div>
                         <div className="fi-muted">{kind === "vehicle" ? "Vehicle" : "Driver"}</div>
@@ -55,27 +62,28 @@ export function Detail({ kind, id, config, periods, data, refData, session, onCl
                 </header>
 
                 <section className="fi-kpis fi-kpis--3">
-                    <Mini title="Current score" value={fmtScore(sum.current)} sub={scoreUnitLabel(config)} badge={<BandPill band={sum.band} />} trend={sum.trend} />
-                    <Mini title="Events (current)" value={sum.currentEvents.toLocaleString()} sub={`${sum.currentPoints.toLocaleString()} points`} />
+                    <Mini title="Current score" value={fmtScore(sum.current)} sub="out of 100" badge={<BandPill band={sum.band} />} trend={<Trend delta={sum.delta} goodWhen="up" />} />
+                    <Mini title="Events (current)" value={sum.currentEvents.toLocaleString()} sub={`${fmtRate(sum.currentDistanceKm > 0 ? sum.currentEvents / exposure(sum.currentDistanceKm, config) * 1000 : null)} ${rateUnitLabel(config)}`} />
                     <Mini title="Distance (current)" value={fmtDistance(sum.currentDistanceKm, config.unit)} sub={`${fmtDistance(sum.totalDistanceKm, config.unit)} over ${n} periods`} />
                 </section>
 
                 <section className="fi-card fi-card--flat">
                     <h4>Score by period <span className="fi-muted">— click a bar to list its events</span></h4>
-                    <BarTrend values={scoreSeries(series, config)} labels={periods.map(x => x.label)} unitLabel={scoreUnitLabel(config)}
-                              height={150} width={760} onSelect={setPeriodIdx} selected={periodIdx} />
+                    <BarTrend values={scoreSeries(series, config)} labels={periods.map(x => x.label)} unitLabel="/ 100"
+                              height={150} width={760} max={100} bands={config.bands} colorByBand onSelect={setPeriodIdx} selected={periodIdx} />
                 </section>
 
                 <section className="fi-card fi-card--flat">
-                    <h4>Rule mix <span className="fi-muted">— current period, weighted points</span></h4>
+                    <h4>Rule mix <span className="fi-muted">— current period, score points lost per rule</span></h4>
                     <table className="fi-table fi-table--compact">
                         <tbody>
                             {rules.map(r => (
                                 <tr key={r.id}>
-                                    <td>{r.name}<span className="fi-muted"> · {r.points} pt</span></td>
-                                    <td style={{ width: "40%" }}><HBar value={r.currentPoints} max={maxPts} label={r.currentPoints.toLocaleString()} tone={r.currentPoints > 0 ? "warn" : "neutral"} /></td>
+                                    <td>{r.name}<span className="fi-muted"> · {r.weight}%</span></td>
+                                    <td style={{ width: "36%" }}><HBar value={r.impact} max={maxImpact} label={r.impact < 0.05 ? "0" : `−${fmtDelta(r.impact).replace("+", "")}`} tone={r.impact > 0 ? "warn" : "neutral"} /></td>
                                     <td className="fi-right">{r.current}<span className="fi-muted"> / {r.previous}</span></td>
-                                    <td className="fi-right"><Trend pct={r.trend} /></td>
+                                    <td className="fi-right" title={rateUnitLabel(config)}>{fmtRate(r.rate)}</td>
+                                    <td className="fi-right"><Trend pct={r.trend} goodWhen="down" /></td>
                                 </tr>
                             ))}
                         </tbody>
@@ -91,7 +99,7 @@ export function Detail({ kind, id, config, periods, data, refData, session, onCl
                     </div>
                     <div className="fi-table-wrap fi-table-wrap--scroll">
                         <table className="fi-table fi-table--compact">
-                            <thead><tr><th>When</th><th>Rule</th>{kind === "vehicle" ? <th>Driver</th> : <th>Vehicle</th>}<th className="fi-right">Duration</th><th className="fi-right">Distance</th></tr></thead>
+                            <thead><tr><th>When</th><th>Rule</th>{kind === "vehicle" ? <th>Driver</th> : <th>Vehicle</th>}<th className="fi-right">Duration</th><th className="fi-right">Distance</th><th className="fi-right" style={{ width: 150 }}></th></tr></thead>
                             <tbody>
                                 {events.slice(0, 500).map(e => (
                                     <tr key={e.id || `${e.activeFrom}-${e.rule.id}`}>
@@ -102,9 +110,16 @@ export function Detail({ kind, id, config, periods, data, refData, session, onCl
                                             : ((refData.devicesById.get(e.device && e.device.id) || {}).name || "—")}</td>
                                         <td className="fi-right">{fmtDuration(e.duration)}</td>
                                         <td className="fi-right">{e.distance != null ? fmtDistance(Number(e.distance) / 1000, config.unit, true) : "—"}</td>
+                                        <td className="fi-right">
+                                            {onDismiss && (confirmId === e.id
+                                                ? <span className="fi-confirm">False reading?
+                                                    <button className="fi-confirm--yes" disabled={busyId === e.id} onClick={() => dismiss(e)}>{busyId === e.id ? "…" : "Dismiss"}</button>
+                                                    <button onClick={() => setConfirmId(null)}>Keep</button></span>
+                                                : <button className="fi-dismiss" onClick={() => setConfirmId(e.id)} title="Mark this event as a false reading in MyGeotab and remove it from the score">Dismiss</button>)}
+                                        </td>
                                     </tr>
                                 ))}
-                                {events.length === 0 && <tr><td colSpan={5} className="fi-empty">No tracked events in this period.</td></tr>}
+                                {events.length === 0 && <tr><td colSpan={6} className="fi-empty">No tracked events in this period.</td></tr>}
                             </tbody>
                         </table>
                         {events.length > 500 && <p className="fi-muted">Showing the first 500 of {events.length}.</p>}
@@ -120,17 +135,19 @@ function Mini({ title, value, sub, badge, trend }) {
         <div className="fi-kpi fi-kpi--mini">
             <div className="fi-kpi-title">{title}</div>
             <div className="fi-kpi-value">{value}{badge ? <span className="fi-kpi-badge">{badge}</span> : null}</div>
-            <div className="fi-kpi-foot"><span className="fi-muted">{sub}</span>{trend !== undefined && <Trend pct={trend} />}</div>
+            <div className="fi-kpi-foot"><span className="fi-muted">{sub}</span>{trend}</div>
         </div>
     );
 }
+
+function exposure(km, config) { return config.unit === "km" ? km : km / 1.60934; }
 
 function fmtWhen(iso) {
     const d = new Date(iso);
     return d.toLocaleString(undefined, { month: "short", day: "2-digit", hour: "numeric", minute: "2-digit" });
 }
 
-/** ExceptionEvent.duration is an ISO-ish "hh:mm:ss(.fff)" or "d.hh:mm:ss" string. */
+/** ExceptionEvent.duration is "hh:mm:ss(.fff)" or "d.hh:mm:ss". */
 function fmtDuration(dur) {
     if (!dur) return "—";
     const m = String(dur).match(/^(?:(\d+)\.)?(\d{1,2}):(\d{2}):(\d{2})/);

@@ -208,3 +208,85 @@ function parseDetails(d) {
     if (typeof d === "string") { try { return JSON.parse(d); } catch (e) { return null; } }
     return d;
 }
+
+/* ------------------------------ dismissing exception events ------------------------------ */
+
+let dismissStateProbe = null; // Promise<{id,name}|null>
+
+/**
+ * MyGeotab exposes `ExceptionEventState` as an entity type (Get/Set are rate-limited on it in
+ * the API reference) and the Exceptions page's "Include dismissed events" option proves a
+ * dismissed state exists server-side. We discover it at runtime instead of hard-coding an id:
+ * Get ExceptionEventState → pick the one whose id/name says "dismiss". If this server has no
+ * such state (older version) the caller falls back to a local hide list.
+ */
+export function findDismissState(api) {
+    if (!dismissStateProbe) {
+        dismissStateProbe = call(api, "Get", { typeName: "ExceptionEventState" })
+            .then(states => (Array.isArray(states) ? states : []).find(s => /dismiss/i.test(String(s.id || "")) || /dismiss/i.test(String(s.name || ""))) || null)
+            .catch(() => null);
+    }
+    return dismissStateProbe;
+}
+
+/**
+ * Dismiss one exception event in MyGeotab. Resolves { mode: "api" } when the server accepted
+ * the state change, or { mode: "local", reason } when the API path isn't available so the
+ * caller should hide it locally instead. Throws only on an unexpected server error.
+ */
+export async function dismissException(api, event) {
+    const state = await findDismissState(api);
+    if (!state) return { mode: "local", reason: "This MyGeotab server does not expose a dismissed exception state." };
+    const attempts = [
+        { ...event, state: { id: state.id } },                 // full entity as we have it
+        { id: event.id, state: { id: state.id } }              // minimal patch
+    ];
+    let lastErr = null;
+    for (const entity of attempts) {
+        try {
+            await call(api, "Set", { typeName: "ExceptionEvent", entity });
+            return { mode: "api", stateId: state.id };
+        } catch (e) {
+            lastErr = e;
+            if (/not allowed|permission|clearance|security/i.test(e.message)) break; // no point retrying a 403-style refusal
+        }
+    }
+    if (lastErr && /not allowed|permission|clearance|security/i.test(lastErr.message)) {
+        return { mode: "local", reason: "Your security clearance does not allow dismissing exceptions in MyGeotab." };
+    }
+    throw lastErr || new Error("Dismiss failed");
+}
+
+/* ------------------------------ local hide list (fallback) ------------------------------ */
+
+const HIDE_KEY = "gpsfms.fleetInsights.hidden";
+const HIDE_CAP = 400;
+
+export async function loadHidden(api, database) {
+    let recordId = null, ids = [];
+    try {
+        const recs = await call(api, "Get", { typeName: "AddInData", search: { addInId: ADDIN_ID } });
+        const rec = (recs || []).map(r => ({ ...r, details: parseDetails(r.details) })).find(r => r.details && r.details.type === "hidden");
+        if (rec) { recordId = rec.id; ids = Array.isArray(rec.details.ids) ? rec.details.ids : []; }
+    } catch (e) { /* fall through to local */ }
+    if (!ids.length) {
+        try { ids = JSON.parse(localStorage.getItem(`${HIDE_KEY}.${database}`) || "[]"); } catch (e) { ids = []; }
+    }
+    return { recordId, ids: ids.map(x => (typeof x === "string" ? { id: x, at: 0 } : x)) };
+}
+
+export async function saveHidden(api, database, entries, recordId) {
+    const trimmed = [...entries].sort((a, b) => (b.at || 0) - (a.at || 0)).slice(0, HIDE_CAP);
+    try { localStorage.setItem(`${HIDE_KEY}.${database}`, JSON.stringify(trimmed)); } catch (e) { /* ignore */ }
+    const details = { type: "hidden", ids: trimmed, savedAt: new Date().toISOString() };
+    try {
+        if (recordId) {
+            await call(api, "Set", { typeName: "AddInData", entity: { id: recordId, addInId: ADDIN_ID, details } });
+            return { recordId, persisted: "database" };
+        }
+        const id = await call(api, "Add", { typeName: "AddInData", entity: { addInId: ADDIN_ID, details, groups: [{ id: "GroupCompanyId" }] } });
+        return { recordId: id, persisted: "database" };
+    } catch (e) {
+        return { recordId, persisted: "browser", error: friendlyError(e) };
+    }
+}

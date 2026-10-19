@@ -45,7 +45,7 @@ window.geotab = {};
         { id: "RuleAfterHours", name: "After Hours Use", baseType: "Custom" }
     ];
     // propensity per rule (events per vehicle per week)
-    const rate = { RuleSeatbeltId: 1.6, RuleHarshCornering: .5, RuleHardAccel: .3, RuleSpeeding10: .25, RuleDistracted: .15, RuleCellPhone: .12, RuleLens: .1, RuleHarshBrake: .06, RuleIdling: 2, RuleAfterHours: .2 };
+    const rate = { RuleSeatbeltId: 6, RuleHarshCornering: 1.8, RuleHardAccel: 1.0, RuleSpeeding10: 0.9, RuleDistracted: .5, RuleCellPhone: .4, RuleLens: .3, RuleHarshBrake: .25, RuleIdling: 2, RuleAfterHours: .2 };
     const exceptions = [];
     const trips = [];
     const SPAN = 70 * DAY;
@@ -75,7 +75,11 @@ window.geotab = {};
         }
     }
     let addInData = [];
-    window.__mock = { exceptions, trips, calls: [] };
+    const NO_DISMISS = /nodismiss=1/.test(location.search);
+    const states = NO_DISMISS
+        ? [{ id: "ExceptionEventStateValidId", name: "Valid" }, { id: "ExceptionEventStateInvalidId", name: "Invalid" }]
+        : [{ id: "ExceptionEventStateValidId", name: "Valid" }, { id: "ExceptionEventStateInvalidId", name: "Invalid" }, { id: "ExceptionEventStateDismissedId", name: "Dismissed" }];
+    window.__mock = { exceptions, trips, calls: [], sets: [] };
 
     function handleGet(p) {
         window.__mock.calls.push(p);
@@ -93,9 +97,10 @@ window.geotab = {};
             case "Rule": return rules;
             case "User": return drivers;
             case "AddInData": return addInData.filter(r => r.addInId === s.addInId);
+            case "ExceptionEventState": return states;
             case "ExceptionEvent": {
                 const from = Date.parse(s.fromDate), to = Date.parse(s.toDate);
-                const out = exceptions.filter(e => e.rule.id === s.ruleSearch.id && Date.parse(e.activeFrom) >= from && Date.parse(e.activeFrom) <= to);
+                const out = exceptions.filter(e => e.rule.id === s.ruleSearch.id && Date.parse(e.activeFrom) >= from && Date.parse(e.activeFrom) <= to && !(e.state && e.state.id === "ExceptionEventStateDismissedId"));
                 return out.slice(0, p.resultsLimit || 50000);
             }
             case "Trip": {
@@ -109,6 +114,14 @@ window.geotab = {};
     function handle(method, p) {
         if (method === "Get") return handleGet(p);
         if (method === "Add") { const id = "aid" + (addInData.length + 1); addInData.push({ ...p.entity, id }); return id; }
+        if (method === "Set" && p.typeName === "ExceptionEvent") {
+            window.__mock.sets.push(p);
+            if (NO_DISMISS) throw new Error("Set on ExceptionEvent is not allowed: state");
+            const ev = exceptions.find(e => e.id === p.entity.id);
+            if (!ev) throw new Error("ExceptionEvent not found");
+            ev.state = p.entity.state;
+            return null;
+        }
         if (method === "Set") { addInData = addInData.map(r => (r.id === p.entity.id ? { ...r, ...p.entity } : r)); return null; }
         throw new Error("Unsupported method " + method);
     }

@@ -4,7 +4,7 @@ import { Banner } from "@geotab/zenith/dist/banner/banner";
 import { Waiting } from "@geotab/zenith/dist/waiting/waiting";
 import { EmptyState } from "@geotab/zenith/dist/emptyState/emptyState";
 import { buildPeriods, aggregate, buildGroupTree, ROOT_GROUP_ID, normalizeConfig } from "./model.js";
-import { loadReferenceData, loadExceptions, loadTrips, loadConfig, saveConfig, friendlyError } from "./api.js";
+import { loadReferenceData, loadExceptions, loadTrips, loadConfig, saveConfig, loadHidden, saveHidden, dismissException, friendlyError } from "./api.js";
 import { Dashboard, periodLabel } from "./components/Dashboard.jsx";
 import { Settings } from "./components/Settings.jsx";
 
@@ -12,8 +12,9 @@ export default function App({ api, groupFilter, focusNonce }) {
     const [session, setSession] = useState(null);
     const [config, setConfig] = useState(null);
     const [configMeta, setConfigMeta] = useState({ recordId: null, source: "default", serverOk: true });
+    const [hidden, setHidden] = useState({ recordId: null, ids: [] });
     const [refData, setRefData] = useState(null);
-    const [data, setData] = useState(null);
+    const [raw, setRaw] = useState(null);          // { exceptions, trips }
     const [view, setView] = useState("dashboard");
     const [nodeId, setNodeId] = useState(ROOT_GROUP_ID);
     const [loading, setLoading] = useState(false);
@@ -22,11 +23,17 @@ export default function App({ api, groupFilter, focusNonce }) {
     const [saving, setSaving] = useState(false);
     const [saveInfo, setSaveInfo] = useState(null);
     const [asOf, setAsOf] = useState(null);
+    const [toast, setToast] = useState(null);
     const runId = useRef(0);
+
+    const notify = useCallback((text, tone = "info") => {
+        setToast({ text, tone });
+        setTimeout(() => setToast(t => (t && t.text === text ? null : t)), 5000);
+    }, []);
 
     const groupKey = JSON.stringify((groupFilter || []).map(g => g.id).sort());
 
-    /* ---- session + config + reference data ---- */
+    /* ---- session + config + hidden list ---- */
     useEffect(() => {
         let cancelled = false;
         (async () => {
@@ -34,10 +41,11 @@ export default function App({ api, groupFilter, focusNonce }) {
                 const sess = await new Promise(res => api.getSession(s => res(s)));
                 if (cancelled) return;
                 setSession(sess);
-                const cfg = await loadConfig(api, sess.database);
+                const [cfg, hid] = await Promise.all([loadConfig(api, sess.database), loadHidden(api, sess.database)]);
                 if (cancelled) return;
                 setConfig(cfg.config);
                 setConfigMeta({ recordId: cfg.recordId, source: cfg.source, serverOk: cfg.serverOk });
+                setHidden(hid);
                 if (!cfg.config.rules.length) setView("settings");
             } catch (e) {
                 if (!cancelled) setError(friendlyError(e));
@@ -46,6 +54,7 @@ export default function App({ api, groupFilter, focusNonce }) {
         return () => { cancelled = true; };
     }, [api]);
 
+    /* ---- reference data (re-read when the group filter changes) ---- */
     useEffect(() => {
         let cancelled = false;
         setRefData(null);
@@ -87,9 +96,7 @@ export default function App({ api, groupFilter, focusNonce }) {
                 loadTrips(api, { from, to, groupFilter, deviceCount: refData.devices.length, onProgress })
             ]);
             if (runId.current !== myRun) return;
-            const deviceIds = new Set(refData.devices.map(d => d.id));
-            const agg = aggregate({ periods, config, exceptions, trips, deviceIds });
-            setData({ ...agg, exceptions, trips });
+            setRaw({ exceptions, trips });
             setAsOf(new Date());
         } catch (e) {
             if (runId.current === myRun) setError(friendlyError(e));
@@ -100,6 +107,40 @@ export default function App({ api, groupFilter, focusNonce }) {
 
     const configKey = config ? JSON.stringify([config.rules.map(r => r.id), config.period, config.periods]) : "";
     useEffect(() => { refresh(); }, [configKey, refData]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    /* ---- derived: aggregate (cheap; re-runs when weights, hidden list or raw data change) ---- */
+    const data = useMemo(() => {
+        if (!raw || !refData || !config) return null;
+        const hiddenIds = new Set(hidden.ids.map(h => h.id));
+        const exceptions = hiddenIds.size ? raw.exceptions.filter(e => !hiddenIds.has(e.id)) : raw.exceptions;
+        const deviceIds = new Set(refData.devices.map(d => d.id));
+        const agg = aggregate({ periods, config, exceptions, trips: raw.trips, deviceIds });
+        return { ...agg, exceptions, trips: raw.trips };
+    }, [raw, refData, config, periods, hidden]);
+
+    /* ---- dismiss ---- */
+    const onDismiss = useCallback(async event => {
+        try {
+            const r = await dismissException(api, event);
+            if (r.mode === "api") {
+                setRaw(prev => prev ? { ...prev, exceptions: prev.exceptions.filter(e => e.id !== event.id) } : prev);
+                notify("Event dismissed in MyGeotab and removed from the score.");
+            } else {
+                const next = { ...hidden, ids: [{ id: event.id, at: Date.now() }, ...hidden.ids.filter(h => h.id !== event.id)] };
+                const saved = await saveHidden(api, session.database, next.ids, hidden.recordId);
+                setHidden({ recordId: saved.recordId, ids: next.ids });
+                notify(`${r.reason} Hidden from Fleet Insights scoring only${saved.persisted === "browser" ? " (this browser)" : ""}.`, "warn");
+            }
+        } catch (e) {
+            notify(`Could not dismiss: ${friendlyError(e)}`, "warn");
+        }
+    }, [api, hidden, session, notify]);
+
+    const onClearHidden = useCallback(async () => {
+        const saved = await saveHidden(api, session.database, [], hidden.recordId);
+        setHidden({ recordId: saved.recordId, ids: [] });
+        notify("All locally hidden events restored.");
+    }, [api, session, hidden, notify]);
 
     /* ---- settings save ---- */
     const onSave = async clean => {
@@ -135,6 +176,7 @@ export default function App({ api, groupFilter, focusNonce }) {
                         {config && <span>{config.periods} × {periodLabel(config)} · {rangeText}</span>}
                         {asOf && <span className="fi-muted"> · updated {asOf.toLocaleTimeString()}</span>}
                         {configMeta.source === "browser" && <span className="fi-muted"> · settings saved in this browser only</span>}
+                        {hidden.ids.length > 0 && <span className="fi-muted"> · {hidden.ids.length} event{hidden.ids.length === 1 ? "" : "s"} hidden locally</span>}
                     </div>
                 </div>
                 <div className="fi-actions">
@@ -154,22 +196,25 @@ export default function App({ api, groupFilter, focusNonce }) {
 
             {config && refData && view === "settings" && (
                 <Settings config={config} rules={refData.rules} onSave={onSave} saving={saving} saveInfo={saveInfo}
+                          hiddenCount={hidden.ids.length} onClearHidden={onClearHidden}
                           onCancel={() => { if (config.rules.length) setView("dashboard"); }} />
             )}
 
             {config && refData && view === "dashboard" && (
                 config.rules.length === 0
-                    ? <EmptyState description="No rules are being tracked yet. Open Settings to choose the exception rules and their point values." />
+                    ? <EmptyState description="No rules are being tracked yet. Open Settings to choose the exception rules and their weights." />
                     : loading && !data
                         ? <Waiting isLoading description={progress || "Loading events and trips…"} />
                         : data
                             ? <>
                                 {loading && <div className="fi-progress">{progress || "Refreshing…"}</div>}
                                 <Dashboard config={config} periods={periods} refData={refData} data={data}
-                                           nodeId={nodeId} setNodeId={setNodeId} session={session} />
+                                           nodeId={nodeId} setNodeId={setNodeId} session={session} onDismiss={onDismiss} notify={notify} />
                               </>
                             : null
             )}
+
+            {toast && <div className={`fi-toast ${toast.tone === "warn" ? "fi-toast--warn" : ""}`} role="status">{toast.text}</div>}
         </div>
     );
 }

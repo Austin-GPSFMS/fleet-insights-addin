@@ -128,3 +128,25 @@ g:hover > .fi-bar { fill: var(--fi-navy); }
 .fi-formula { margin-top: 16px; background: var(--fi-surface-2); border-radius: 8px; padding: 10px 12px; }
 .fi-formula code { display: block; font-size: 12.5px; color: var(--fi-ink); padding: 4px 0; }
 .fi-formula p { margin: 4px 0 0; font-size: 12px; }
+
+.fi-band-line { stroke-width: 1; stroke-dasharray: 4 4; }
+.fi-band-line--low { stroke: var(--fi-ok); }
+.fi-band-line--med { stroke: var(--fi-warn); }
+.fi-band-text { font-size: 10px; fill: var(--fi-ink-2); paint-order: stroke; stroke: #fff; stroke-width: 3px; stroke-linejoin: round; }
+.fi-bar--ok { fill: #8fd09d; } .fi-bar--warn { fill: #f3c66b; } .fi-bar--bad { fill: #f29a99; }
+.fi-bar--current.fi-bar--ok { fill: var(--fi-ok); } .fi-bar--current.fi-bar--warn { fill: var(--fi-warn); } .fi-bar--current.fi-bar--bad { fill: var(--fi-bad); }
+.fi-total { font-size: 12px; font-weight: 500; margin-left: 8px; padding: 1px 8px; border-radius: 999px; }
+.fi-total--ok { background: var(--fi-ok-bg); color: var(--fi-ok); }
+.fi-total--bad { background: var(--fi-bad-bg); color: var(--fi-bad); }
+.fi-menu { position: relative; display: inline-block; }
+.fi-menu-list { position: absolute; right: 0; top: 100%; margin-top: 4px; background: #fff; border: 1px solid var(--fi-line); border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,.12); min-width: 200px; z-index: 50; padding: 4px 0; }
+.fi-menu-item { display: block; width: 100%; text-align: left; background: none; border: none; padding: 8px 14px; font: inherit; font-size: 13px; color: var(--fi-ink); cursor: pointer; }
+.fi-menu-item:hover { background: #eef6fb; }
+.fi-dismiss { background: none; border: 1px solid #c9d0da; border-radius: 6px; padding: 2px 8px; font: inherit; font-size: 12px; color: var(--fi-ink-2); cursor: pointer; }
+.fi-dismiss:hover { border-color: var(--fi-bad); color: var(--fi-bad); }
+.fi-dismiss[disabled] { opacity: .5; cursor: default; }
+.fi-confirm { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; }
+.fi-confirm button { font: inherit; font-size: 12px; padding: 2px 8px; border-radius: 6px; border: 1px solid #c9d0da; background: #fff; cursor: pointer; }
+.fi-confirm button.fi-confirm--yes { background: var(--fi-bad); border-color: var(--fi-bad); color: #fff; }
+.fi-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--fi-ink); color: #fff; padding: 10px 16px; border-radius: 8px; font-size: 13px; z-index: 10060; box-shadow: 0 6px 24px rgba(0,0,0,.3); max-width: 80vw; }
+.fi-toast--warn { background: #8a5a00; }

@@ -3,16 +3,16 @@
  * hover tooltips, direct label on the current period only.
  */
 import { useState } from "react";
-import { fmtScore, fmtPct } from "../model.js";
+import { fmtScore, fmtPct, fmtDelta } from "../model.js";
 
 /** Vertical bars: one value per period. Highlights the last (current) bar. */
-export function BarTrend({ values, labels, height = 180, width = 1100, unitLabel = "", onSelect, selected }) {
+export function BarTrend({ values, labels, height = 180, width = 1100, unitLabel = "", onSelect, selected, max: fixedMax, bands, colorByBand }) {
     const [hover, setHover] = useState(null);
     const n = values.length;
     const w = width, h = height, padL = 40, padR = 8, padT = 20, padB = 26;
     const plotW = w - padL - padR, plotH = h - padT - padB;
     const nums = values.map(v => (v == null ? 0 : v));
-    const max = Math.max(1, ...nums);
+    const max = fixedMax || Math.max(1, ...nums);
     const step = plotW / Math.max(n, 1);
     const barW = Math.max(6, Math.min(56, step * 0.5));
     const yFor = v => padT + plotH - (v / max) * plotH;
@@ -42,7 +42,7 @@ export function BarTrend({ values, labels, height = 180, width = 1100, unitLabel
                             <rect x={padL + i * step} y={padT} width={step} height={plotH} fill="transparent" />
                             {barH > 0 && (
                                 <path d={roundedTop(x, y, barW, barH, 4)}
-                                      className={`fi-bar ${isCur ? "fi-bar--current" : ""} ${isSel ? "fi-bar--selected" : ""} ${v == null ? "fi-bar--na" : ""}`} />
+                                      className={`fi-bar ${isCur ? "fi-bar--current" : ""} ${isSel ? "fi-bar--selected" : ""} ${v == null ? "fi-bar--na" : ""} ${colorByBand && bands && v != null ? `fi-bar--${v >= bands.low ? "ok" : v >= bands.medium ? "warn" : "bad"}` : ""}`} />
                             )}
                             {(isCur || hover === i) && (
                                 <text x={x + barW / 2} y={Math.min(y - 6, yFor(0) - 6)} className="fi-label" textAnchor="middle">
@@ -55,12 +55,26 @@ export function BarTrend({ values, labels, height = 180, width = 1100, unitLabel
                         </g>
                     );
                 })}
+                {bands && bands.low <= max && (
+                    <g>
+                        <line x1={padL} x2={w - padR} y1={yFor(bands.low)} y2={yFor(bands.low)} className="fi-band-line fi-band-line--low" />
+                        <text x={w - padR} y={yFor(bands.low) - 3} className="fi-band-text" textAnchor="end">Low risk ≥ {bands.low}</text>
+                    </g>
+                )}
+                {bands && bands.medium < bands.low && (
+                    <g>
+                        <line x1={padL} x2={w - padR} y1={yFor(bands.medium)} y2={yFor(bands.medium)} className="fi-band-line fi-band-line--med" />
+                        <text x={w - padR} y={yFor(bands.medium) - 3} className="fi-band-text" textAnchor="end">Medium ≥ {bands.medium}</text>
+                    </g>
+                )}
             </svg>
             {hover != null && (
                 <div className="fi-tip">
                     <strong>{hover === n - 1 ? "Current period" : labels[hover]}</strong>
-                    <span>{values[hover] == null ? "No exposure" : `${fmtScore(values[hover])} ${unitLabel}`}</span>
-                    {hover > 0 && <span className="fi-tip-sub">vs previous: {fmtPct(pct(values[hover], values[hover - 1]))}</span>}
+                    <span>{values[hover] == null ? "Not scored (low exposure)" : `${fmtScore(values[hover])} ${unitLabel}`}</span>
+                    {hover > 0 && values[hover] != null && values[hover - 1] != null && (
+                        <span className="fi-tip-sub">vs previous: {fmtDelta(values[hover] - values[hover - 1])} pts</span>
+                    )}
                 </div>
             )}
         </div>
@@ -93,14 +107,16 @@ function niceTicks(max, count) {
 /** Tiny inline sparkline for table rows. */
 export function Sparkline({ values, width = 90, height = 22 }) {
     const nums = values.map(v => (v == null ? 0 : v));
-    const max = Math.max(1, ...nums);
     const n = nums.length;
+    const lo = Math.min(...nums), hi = Math.max(...nums);
+    const span = hi - lo || 1;
     const stepX = n > 1 ? width / (n - 1) : width;
-    const pts = nums.map((v, i) => `${(i * stepX).toFixed(1)},${(height - 2 - (v / max) * (height - 4)).toFixed(1)}`).join(" ");
+    const y = v => height - 3 - ((v - lo) / span) * (height - 6);
+    const pts = nums.map((v, i) => `${(i * stepX).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
     return (
         <svg width={width} height={height} className="fi-spark" aria-hidden="true">
             <polyline points={pts} fill="none" className="fi-spark-line" />
-            <circle cx={(n - 1) * stepX} cy={height - 2 - (nums[n - 1] / max) * (height - 4)} r="2.5" className="fi-spark-dot" />
+            <circle cx={(n - 1) * stepX} cy={y(nums[n - 1])} r="2.5" className="fi-spark-dot" />
         </svg>
     );
 }
@@ -116,21 +132,28 @@ export function HBar({ value, max, label, tone = "neutral" }) {
     );
 }
 
-/** Trend indicator: for a "lower is better" score, an increase is bad. */
-export function Trend({ pct: v, invert = false }) {
-    if (v == null) return <span className="fi-trend fi-trend--flat">—</span>;
-    const r = Math.round(v);
-    if (r === 0) return <span className="fi-trend fi-trend--flat">0%</span>;
+/**
+ * Trend indicator. `goodWhen` says which direction is good: "up" for scores (higher is better),
+ * "down" for event counts. Pass `delta` (absolute points) instead of `pct` for 0–100 scores.
+ */
+export function Trend({ pct: v, delta, goodWhen = "down" }) {
+    const useDelta = delta !== undefined;
+    const val = useDelta ? delta : v;
+    if (val == null) return <span className="fi-trend fi-trend--flat">—</span>;
+    const r = useDelta ? Math.round(val * 10) / 10 : Math.round(val);
+    if (r === 0) return <span className="fi-trend fi-trend--flat">{useDelta ? "±0" : "0%"}</span>;
     const up = r > 0;
-    const bad = invert ? !up : up;
+    const good = goodWhen === "up" ? up : !up;
+    const text = useDelta ? `${Math.abs(r).toLocaleString(undefined, { maximumFractionDigits: 1 })} pts` : `${Math.abs(r)}%`;
     return (
-        <span className={`fi-trend ${bad ? "fi-trend--bad" : "fi-trend--good"}`} title={bad ? "Worse than previous period" : "Better than previous period"}>
-            {up ? "▲" : "▼"} {Math.abs(r)}%
+        <span className={`fi-trend ${good ? "fi-trend--good" : "fi-trend--bad"}`} title={good ? "Better than previous period" : "Worse than previous period"}>
+            {up ? "▲" : "▼"} {text}
         </span>
     );
 }
 
 export function BandPill({ band }) {
     const cls = band === "Low" ? "ok" : band === "Medium" ? "warn" : band === "High" ? "bad" : "na";
-    return <span className={`fi-pill fi-pill--${cls}`}>{band}</span>;
+    const label = band === "Low" ? "Low risk" : band === "Medium" ? "Medium risk" : band === "High" ? "High risk" : band;
+    return <span className={`fi-pill fi-pill--${cls}`}>{label}</span>;
 }

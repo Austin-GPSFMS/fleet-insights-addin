@@ -2,52 +2,118 @@
  * Pure scoring / aggregation model. No DOM, no Geotab API — unit-tested in Node.
  *
  * Score model (transparent on purpose — this is what GoAnalytics hides):
- *   score(subject, period) = Σ_rules count(rule) × points(rule)          ("unsafe points")
- *   normalization "per100mi"  → points ÷ miles × 100
- *   normalization "per1000km" → points ÷ km × 1000
- *   normalization "perEngineHour" → points ÷ engine hours   (requires engine-hours input)
- * Lower is better. Bands classify a subject's CURRENT-period score.
+ *   rate(rule)      = events(rule) ÷ distance × 1,000           (events per 1,000 mi or km)
+ *   subScore(rule)  = 100 × max(0, 1 − rate ÷ maxRate)           (0–100; maxRate = rate that scores 0)
+ *   score           = Σ subScore(rule) × weight(rule) ÷ 100      (weights total 100%)
+ * Higher is better; 100 = clean. A subject with less than `minDistance` of exposure in a
+ * period is not scored (null) so a 2-mile trip with one event can't become a 0.
+ * Bands classify a subject's CURRENT-period score: ≥ low → Low risk, ≥ medium → Medium, else High.
  */
 
 export const ADDIN_ID = "an_qIKWbzyE09jcDpY-MtXw";
 
 export const DEFAULT_CONFIG = Object.freeze({
-    version: 1,
-    rules: [],                 // [{ id, name, points }]
+    version: 2,
+    rules: [],                 // [{ id, name, weight (% of 100), maxRate (events per 1,000 exposure units that scores 0) }]
     period: "week",            // "day" | "week" | "month"
     periods: 8,                // number of trailing periods to show
-    normalization: "none",     // "none" | "per100mi" | "per1000km" | "perEngineHour"
-    unit: "miles",             // display unit for distance
-    bands: { low: 10, medium: 30 } // score <= low → Low; <= medium → Medium; else High
+    unit: "miles",             // exposure + display unit: rates are per 1,000 mi or per 1,000 km
+    minDistance: 10,           // minimum distance (in `unit`) in a period before a subject is scored
+    bands: { low: 90, medium: 75 } // score ≥ low → Low risk; ≥ medium → Medium; else High
 });
 
 export const PERIOD_DAYS = { day: 1, week: 7, month: 30 };
 const KM_PER_MILE = 1.60934;
 const DAY_MS = 86400000;
 
-/** Sensible band thresholds per normalization (per-subject, per-period score). */
-export function defaultBands(normalization) {
-    switch (normalization) {
-        case "per100mi": return { low: 2, medium: 5 };
-        case "per1000km": return { low: 12, medium: 30 };
-        case "perEngineHour": return { low: 0.5, medium: 1.5 };
-        default: return { low: 10, medium: 30 };
+/** Default "events per 1,000 (mi|km) that scores 0" by rule-name keyword. */
+export const MAX_RATE_SUGGESTIONS = [
+    [/collision|crash|accident|impact/i, 1],
+    [/phone|cell|handheld|mobile/i, 5],
+    [/drows|fatigue|yawn/i, 5],
+    [/distract/i, 8],
+    [/smok|vap/i, 10],
+    [/lens|obstruct|camera cover|tamper/i, 10],
+    [/following|tailgat|headway/i, 15],
+    [/seat ?belt/i, 25],
+    [/speed/i, 25],
+    [/stop sign|rolling stop/i, 20],
+    [/lane/i, 30],
+    [/harsh brak|hard brak/i, 40],
+    [/harsh corner|hard corner/i, 40],
+    [/harsh accel|hard accel|aggressive/i, 50]
+];
+/** Relative weight suggestions (normalized to 100 at suggest time). */
+export const WEIGHT_SUGGESTIONS = [
+    [/collision|crash|accident|impact/i, 25],
+    [/phone|cell|handheld|mobile/i, 10],
+    [/drows|fatigue|yawn/i, 8],
+    [/distract/i, 8],
+    [/seat ?belt/i, 6],
+    [/following|tailgat|headway/i, 5],
+    [/lens|obstruct|camera cover|tamper/i, 5],
+    [/speed/i, 4],
+    [/smok|vap/i, 4],
+    [/stop sign|rolling stop/i, 4],
+    [/harsh brak|hard brak/i, 3],
+    [/harsh corner|hard corner/i, 3],
+    [/lane/i, 3],
+    [/harsh accel|hard accel|aggressive/i, 2]
+];
+
+export function suggestMaxRate(name) {
+    for (const [re, v] of MAX_RATE_SUGGESTIONS) if (re.test(String(name))) return v;
+    return 25;
+}
+export function suggestRelativeWeight(name) {
+    for (const [re, v] of WEIGHT_SUGGESTIONS) if (re.test(String(name))) return v;
+    return 2;
+}
+
+/** Scale weights so they total exactly 100 (integers; remainder goes to the largest). */
+export function normalizeWeights(rules) {
+    const total = rules.reduce((a, r) => a + Math.max(0, num(r.weight, 0)), 0);
+    if (!rules.length) return rules;
+    if (total <= 0) {
+        const even = Math.floor(100 / rules.length);
+        const out = rules.map(r => ({ ...r, weight: even }));
+        out[0].weight += 100 - even * rules.length;
+        return out;
     }
+    const scaled = rules.map(r => ({ ...r, weight: Math.floor((Math.max(0, num(r.weight, 0)) / total) * 100) }));
+    let rem = 100 - scaled.reduce((a, r) => a + r.weight, 0);
+    const order = [...scaled.keys()].sort((a, b) => scaled[b].weight - scaled[a].weight);
+    for (let i = 0; rem > 0; i = (i + 1) % order.length) { scaled[order[i]].weight += 1; rem--; }
+    return scaled;
+}
+
+export function weightTotal(rules) {
+    return rules.reduce((a, r) => a + num(r.weight, 0), 0);
 }
 
 export function normalizeConfig(raw) {
     const c = { ...DEFAULT_CONFIG, ...(raw || {}) };
     c.rules = Array.isArray(c.rules)
-        ? c.rules.filter(r => r && r.id).map(r => ({ id: String(r.id), name: String(r.name || r.id), points: num(r.points, 1) }))
+        ? c.rules.filter(r => r && r.id).map(r => ({
+            id: String(r.id),
+            name: String(r.name || r.id),
+            // v1 configs carried `points`; carry them over as relative weights.
+            weight: num(r.weight, num(r.points, suggestRelativeWeight(r.name))),
+            maxRate: Math.max(0.01, num(r.maxRate, suggestMaxRate(r.name)))
+        }))
         : [];
+    if (c.rules.length && Math.abs(weightTotal(c.rules) - 100) > 0.001) c.rules = normalizeWeights(c.rules);
     if (!PERIOD_DAYS[c.period]) c.period = "week";
     c.periods = Math.min(Math.max(Math.round(num(c.periods, 8)), 2), 26);
-    if (!["none", "per100mi", "per1000km", "perEngineHour"].includes(c.normalization)) c.normalization = "none";
     if (!["miles", "km"].includes(c.unit)) c.unit = "miles";
-    const db = defaultBands(c.normalization);
+    c.minDistance = Math.max(0, num(c.minDistance, 10));
     const rb = (raw && raw.bands) || {};
-    c.bands = { low: num(rb.low, db.low), medium: num(rb.medium, db.medium) };
-    if (c.bands.medium < c.bands.low) c.bands.medium = c.bands.low;
+    // v1 bands were "lower is better" thresholds (e.g. 10/30); detect and reset to v2 defaults.
+    const looksV1 = raw && raw.version !== 2 && num(rb.low, 90) < num(rb.medium, 75);
+    c.bands = looksV1 ? { ...DEFAULT_CONFIG.bands } : { low: clamp(num(rb.low, 90), 0, 100), medium: clamp(num(rb.medium, 75), 0, 100) };
+    if (c.bands.medium > c.bands.low) c.bands.medium = c.bands.low;
+    c.version = 2;
+    delete c.normalization;
     return c;
 }
 
@@ -55,6 +121,7 @@ function num(v, d) {
     const n = Number(v);
     return Number.isFinite(n) ? n : d;
 }
+function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
 
 /* ------------------------------ periods ------------------------------ */
 
@@ -94,32 +161,51 @@ export function bucketIndex(periods, t) {
 
 /* ------------------------------ scoring ------------------------------ */
 
-export function pointsFor(counts, config) {
-    let pts = 0;
-    for (const r of config.rules) pts += (counts[r.id] || 0) * r.points;
-    return pts;
+/** Exposure in the configured unit (miles or km) from km. */
+export function exposureOf(distanceKm, config) {
+    return config.unit === "km" ? distanceKm : distanceKm / KM_PER_MILE;
+}
+
+/** Events per 1,000 exposure units. */
+export function rateFor(count, distanceKm, config) {
+    const exp = exposureOf(distanceKm, config);
+    return exp > 0 ? (count / exp) * 1000 : null;
+}
+
+/** 0–100 sub-score for one rule. */
+export function subScoreFor(count, distanceKm, rule, config) {
+    const rate = rateFor(count, distanceKm, config);
+    if (rate == null) return null;
+    return Math.max(0, 100 * (1 - rate / rule.maxRate));
 }
 
 /**
  * @param counts  { ruleId: count }
  * @param distanceKm  km driven in the period
- * @param engineHours engine hours in the period (optional)
- * @returns number|null  null when normalization needs exposure that is 0
+ * @returns number|null  null when exposure is below config.minDistance
  */
-export function scoreFor(counts, distanceKm, config, engineHours = 0) {
-    const pts = pointsFor(counts, config);
-    switch (config.normalization) {
-        case "per100mi": return distanceKm > 0 ? (pts / (distanceKm / KM_PER_MILE)) * 100 : (pts > 0 ? null : 0);
-        case "per1000km": return distanceKm > 0 ? (pts / distanceKm) * 1000 : (pts > 0 ? null : 0);
-        case "perEngineHour": return engineHours > 0 ? pts / engineHours : (pts > 0 ? null : 0);
-        default: return pts;
+export function scoreFor(counts, distanceKm, config) {
+    if (!config.rules.length) return null;
+    if (exposureOf(distanceKm, config) < Math.max(config.minDistance, 1e-9)) return null;
+    let total = 0;
+    for (const r of config.rules) {
+        const sub = subScoreFor(counts[r.id] || 0, distanceKm, r, config);
+        total += (sub == null ? 0 : sub) * (r.weight / 100);
     }
+    return Math.min(100, Math.max(0, total));
+}
+
+/** Weighted "unsafe points" — Σ events × weight; context only (rank-free magnitude). */
+export function pointsFor(counts, config) {
+    let pts = 0;
+    for (const r of config.rules) pts += (counts[r.id] || 0) * r.weight;
+    return pts;
 }
 
 export function bandFor(score, config) {
-    if (score == null) return "No exposure";
-    if (score <= config.bands.low) return "Low";
-    if (score <= config.bands.medium) return "Medium";
+    if (score == null) return "Low exposure";
+    if (score >= config.bands.low) return "Low";
+    if (score >= config.bands.medium) return "Medium";
     return "High";
 }
 
@@ -127,6 +213,12 @@ export function trendPct(current, previous) {
     if (current == null || previous == null) return null;
     if (previous === 0) return current === 0 ? 0 : null;
     return ((current - previous) / previous) * 100;
+}
+
+/** Absolute change in score points (0–100 scale) — more readable than % for scores. */
+export function deltaPts(current, previous) {
+    if (current == null || previous == null) return null;
+    return current - previous;
 }
 
 export function median(values) {
@@ -247,6 +339,7 @@ export function summarize(series, config) {
         current,
         previous,
         trend: trendPct(current, previous),
+        delta: deltaPts(current, previous),
         band: bandFor(current, config),
         currentEvents: Object.values(currentCounts).reduce((a, b) => a + b, 0),
         currentPoints: pointsFor(currentCounts, config),
@@ -262,16 +355,23 @@ export function ruleBreakdown(series, config) {
     const n = series.counts.length;
     const cur = series.counts[n - 1] || {};
     const prev = n > 1 ? series.counts[n - 2] || {} : {};
+    const curKm = series.distanceKm[n - 1] || 0;
+    const prevKm = n > 1 ? series.distanceKm[n - 2] || 0 : 0;
     return config.rules.map(r => {
         const c = cur[r.id] || 0, p = prev[r.id] || 0;
+        const sub = subScoreFor(c, curKm, r, config);
         return {
-            id: r.id, name: r.name, points: r.points,
+            id: r.id, name: r.name, weight: r.weight, maxRate: r.maxRate,
             current: c, previous: p, trend: trendPct(c, p),
-            currentPoints: c * r.points,
+            rate: rateFor(c, curKm, config), previousRate: rateFor(p, prevKm, config),
+            subScore: sub,
+            // points lost from the 100 ceiling because of this rule (what the bar shows)
+            impact: sub == null ? 0 : (100 - sub) * (r.weight / 100),
+            currentPoints: c * r.weight,
             perPeriod: series.counts.map(cc => cc[r.id] || 0),
             total: series.counts.reduce((a, cc) => a + (cc[r.id] || 0), 0)
         };
-    }).sort((a, b) => b.currentPoints - a.currentPoints || b.current - a.current);
+    }).sort((a, b) => b.impact - a.impact || b.current - a.current);
 }
 
 /* ------------------------------ groups ------------------------------ */
@@ -360,8 +460,7 @@ export function breadcrumb(nodeId, tree) {
 
 export function fmtScore(v) {
     if (v == null) return "—";
-    if (Math.abs(v) >= 100) return Math.round(v).toLocaleString();
-    return (Math.round(v * 10) / 10).toLocaleString(undefined, { maximumFractionDigits: 1 });
+    return Math.round(v).toLocaleString();
 }
 
 export function fmtPct(v) {
@@ -377,11 +476,21 @@ export function fmtDistance(km, unit, precise = false) {
     return `${Math.round(d).toLocaleString()} ${u}`;
 }
 
-export function scoreUnitLabel(config) {
-    switch (config.normalization) {
-        case "per100mi": return "points / 100 mi";
-        case "per1000km": return "points / 1,000 km";
-        case "perEngineHour": return "points / engine hr";
-        default: return "points";
-    }
+export function scoreUnitLabel() {
+    return "out of 100";
+}
+
+export function rateUnitLabel(config) {
+    return config.unit === "km" ? "per 1,000 km" : "per 1,000 mi";
+}
+
+export function fmtRate(v) {
+    if (v == null) return "—";
+    return v < 10 ? v.toFixed(1) : Math.round(v).toLocaleString();
+}
+
+export function fmtDelta(v) {
+    if (v == null) return "—";
+    const r = Math.round(v * 10) / 10;
+    return `${r > 0 ? "+" : ""}${r.toLocaleString(undefined, { maximumFractionDigits: 1 })}`;
 }
