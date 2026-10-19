@@ -1,0 +1,13 @@
+{
+  "name": "Fleet Insights (dev)",
+  "supportEmail": "support@gpsfms.com",
+  "version": "0.1.0-dev",
+  "items": [
+    {
+      "url": "http://localhost:8080/dist/index.html",
+      "path": "ActivityLink/",
+      "menuName": { "en": "Fleet Insights (dev)" }
+    }
+  ],
+  "isSigned": false
+}

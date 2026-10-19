@@ -1,0 +1,16 @@
+{
+  "name": "Fleet Insights",
+  "supportEmail": "support@gpsfms.com",
+  "version": "0.1.0",
+  "items": [
+    {
+      "url": "https://austin-gpsfms.github.io/fleet-insights-addin/dist/index.html",
+      "path": "ActivityLink/",
+      "menuName": {
+        "en": "Fleet Insights",
+        "es": "Fleet Insights"
+      }
+    }
+  ],
+  "isSigned": false
+}

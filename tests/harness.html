@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Fleet Insights — mock harness</title>
+<style>body{margin:0;font-family:Roboto,Arial,sans-serif;background:#f4f4f4} #checkmateContent{min-height:100vh}</style>
+</head>
+<body>
+<div id="checkmateContent"></div>
+<script>
+/* ---- Mock MyGeotab: geotab global + api with Get/Add/Set/multiCall ---- */
+window.geotab = {};
+(function () {
+    const DAY = 86400000;
+    const now = Date.now();
+    const rnd = mulberry32(42);
+    function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+    const groups = [
+        { id: "GroupCompanyId", name: "Company", children: [{ id: "gNorth" }, { id: "gSouth" }, { id: "gPrivate" }] },
+        { id: "gNorth", name: "North Division", children: [{ id: "gNorthYard" }, { id: "gNorthCrew" }] },
+        { id: "gNorthYard", name: "North - Yard", children: [] },
+        { id: "gNorthCrew", name: "North - Crews", children: [] },
+        { id: "gSouth", name: "South Division", children: [] },
+        { id: "gPrivate", name: "Private Assets", children: [] }
+    ];
+    const leafGroups = ["gNorthYard", "gNorthCrew", "gSouth", "gPrivate", "GroupCompanyId"];
+    const devices = [];
+    for (let i = 0; i < 60; i++) {
+        const g = leafGroups[i % leafGroups.length];
+        devices.push({ id: "b" + (i + 1), name: "Truck " + String(i + 1).padStart(3, "0"), serialNumber: "G9" + (100000 + i), groups: [{ id: g }] });
+    }
+    const drivers = [];
+    for (let i = 0; i < 25; i++) drivers.push({ id: "u" + (i + 1), name: "driver" + (i + 1) + "@example.com", firstName: "Driver", lastName: "#" + (i + 1), isDriver: true });
+    const rules = [
+        { id: "RuleSeatbeltId", name: "Driver Seat Belt +25 MPH", baseType: "Stock" },
+        { id: "RuleHarshCornering", name: "Harsh Cornering - Med/Heavy", baseType: "Custom" },
+        { id: "RuleHardAccel", name: "Hard Acceleration - Med/Heavy", baseType: "Custom" },
+        { id: "RuleSpeeding10", name: "Speeding +10 Over Posted", baseType: "Custom" },
+        { id: "RuleDistracted", name: "Distracted Driving 35+", baseType: "Custom" },
+        { id: "RuleCellPhone", name: "Cell phone use", baseType: "Custom" },
+        { id: "RuleLens", name: "Lens obstruction", baseType: "Custom" },
+        { id: "RuleHarshBrake", name: "Harsh Braking - Med/Heavy", baseType: "Custom" },
+        { id: "RuleIdling", name: "Idling > 15 min", baseType: "Custom" },
+        { id: "RuleAfterHours", name: "After Hours Use", baseType: "Custom" }
+    ];
+    // propensity per rule (events per vehicle per week)
+    const rate = { RuleSeatbeltId: 1.6, RuleHarshCornering: .5, RuleHardAccel: .3, RuleSpeeding10: .25, RuleDistracted: .15, RuleCellPhone: .12, RuleLens: .1, RuleHarshBrake: .06, RuleIdling: 2, RuleAfterHours: .2 };
+    const exceptions = [];
+    const trips = [];
+    const SPAN = 70 * DAY;
+    let eid = 0, tid = 0;
+    for (const d of devices) {
+        const devIdx = Number(d.id.slice(1));
+        const risk = d.groups[0].id === "gPrivate" ? 2.2 : d.groups[0].id === "gSouth" ? 0.5 : 1; // Private Assets are bad
+        const improving = devIdx % 3 === 0; // a third of the fleet improves over time
+        const driver = drivers[devIdx % drivers.length];
+        for (let t = now - SPAN; t < now; t += DAY) {
+            const ageFactor = improving ? 0.5 + 0.5 * ((now - t) / SPAN) : 1 + 0.3 * (1 - (now - t) / SPAN);
+            // trips: 3-8 / day
+            const nTrips = 3 + Math.floor(rnd() * 6);
+            for (let k = 0; k < nTrips; k++) {
+                const start = t + rnd() * DAY;
+                trips.push({ id: "t" + (++tid), start: new Date(start).toISOString(), stop: new Date(start + 1800000).toISOString(), distance: 5 + rnd() * 40, device: { id: d.id }, driver: { id: driver.id } });
+            }
+            for (const r of rules) {
+                const lambda = (rate[r.id] / 7) * risk * ageFactor;
+                let n = 0; let p = Math.exp(-lambda), s = p; const u = rnd();
+                while (u > s) { n++; p *= lambda / n; s += p; }
+                for (let k = 0; k < n; k++) {
+                    const at = t + rnd() * DAY;
+                    exceptions.push({ id: "e" + (++eid), activeFrom: new Date(at).toISOString(), activeTo: new Date(at + 30000).toISOString(), device: { id: d.id }, driver: { id: driver.id }, rule: { id: r.id }, distance: Math.round(rnd() * 800), duration: "00:00:" + String(10 + Math.floor(rnd() * 49)).padStart(2, "0") });
+                }
+            }
+        }
+    }
+    let addInData = [];
+    window.__mock = { exceptions, trips, calls: [] };
+
+    function handleGet(p) {
+        window.__mock.calls.push(p);
+        const s = p.search || {};
+        switch (p.typeName) {
+            case "Device": {
+                let out = devices;
+                if (s.groups && s.groups.length && !s.groups.some(g => g.id === "GroupCompanyId")) {
+                    const ids = new Set(s.groups.map(g => g.id));
+                    out = devices.filter(d => d.groups.some(g => ids.has(g.id)));
+                }
+                return out;
+            }
+            case "Group": return groups;
+            case "Rule": return rules;
+            case "User": return drivers;
+            case "AddInData": return addInData.filter(r => r.addInId === s.addInId);
+            case "ExceptionEvent": {
+                const from = Date.parse(s.fromDate), to = Date.parse(s.toDate);
+                const out = exceptions.filter(e => e.rule.id === s.ruleSearch.id && Date.parse(e.activeFrom) >= from && Date.parse(e.activeFrom) <= to);
+                return out.slice(0, p.resultsLimit || 50000);
+            }
+            case "Trip": {
+                const from = Date.parse(s.fromDate), to = Date.parse(s.toDate);
+                const out = trips.filter(t => Date.parse(t.start) >= from && Date.parse(t.start) <= to);
+                return out.slice(0, p.resultsLimit || 50000);
+            }
+            default: throw new Error("Unsupported typeName " + p.typeName);
+        }
+    }
+    function handle(method, p) {
+        if (method === "Get") return handleGet(p);
+        if (method === "Add") { const id = "aid" + (addInData.length + 1); addInData.push({ ...p.entity, id }); return id; }
+        if (method === "Set") { addInData = addInData.map(r => (r.id === p.entity.id ? { ...r, ...p.entity } : r)); return null; }
+        throw new Error("Unsupported method " + method);
+    }
+    window.__mockApi = {
+        call(method, p, ok, fail) { setTimeout(() => { try { ok(handle(method, p)); } catch (e) { fail({ message: e.message }); } }, 5); },
+        multiCall(calls, ok, fail) { setTimeout(() => { try { ok(calls.map(([m, p]) => handle(m, p))); } catch (e) { fail({ message: e.message }); } }, 10); },
+        getSession(cb) { cb({ database: "mockdb", userName: "tester@gpsfms.com", sessionId: "s1" }); }
+    };
+    window.__mockState = { getGroupFilter() { return [{ id: "GroupCompanyId" }]; } };
+})();
+</script>
+<script src="../dist/addin.js"></script>
+<script>
+    const addin = geotab.addin.fleetInsights();
+    addin.initialize(window.__mockApi, window.__mockState, () => { window.__initialized = true; });
+</script>
+</body>
+</html>
