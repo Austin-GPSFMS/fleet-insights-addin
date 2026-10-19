@@ -150,3 +150,13 @@ g:hover > .fi-bar { fill: var(--fi-navy); }
 .fi-confirm button.fi-confirm--yes { background: var(--fi-bad); border-color: var(--fi-bad); color: #fff; }
 .fi-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--fi-ink); color: #fff; padding: 10px 16px; border-radius: 8px; font-size: 13px; z-index: 10060; box-shadow: 0 6px 24px rgba(0,0,0,.3); max-width: 80vw; }
 .fi-toast--warn { background: #8a5a00; }
+
+.fi-periodbar { display: inline-flex; align-items: center; gap: 6px; background: #fff; border: 1px solid var(--fi-line); border-radius: 8px; padding: 4px 8px; }
+.fi-input--inline { width: auto; padding: 4px 6px; font-size: 12.5px; }
+.fi-input--tiny { width: 56px; text-align: center; }
+.fi-types { list-style: none; margin: 6px 0 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; font-size: 13px; }
+.fi-types label { display: flex; gap: 8px; align-items: center; cursor: pointer; }
+.fi-group-list { list-style: none; margin: 6px 0 0; padding: 0; max-height: 220px; overflow-y: auto; border: 1px solid var(--fi-line); border-radius: 6px; font-size: 13px; }
+.fi-group-list li { padding: 4px 10px; border-bottom: 1px solid var(--fi-line); }
+.fi-group-list li:last-child { border-bottom: none; }
+.fi-group-list label { display: flex; gap: 8px; align-items: center; cursor: pointer; }

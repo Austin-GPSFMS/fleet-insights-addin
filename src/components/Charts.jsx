@@ -58,13 +58,13 @@ export function BarTrend({ values, labels, height = 180, width = 1100, unitLabel
                 {bands && bands.low <= max && (
                     <g>
                         <line x1={padL} x2={w - padR} y1={yFor(bands.low)} y2={yFor(bands.low)} className="fi-band-line fi-band-line--low" />
-                        <text x={w - padR} y={yFor(bands.low) - 3} className="fi-band-text" textAnchor="end">Low risk ≥ {bands.low}</text>
+                        <text x={padL + 4} y={yFor(bands.low) - 3} className="fi-band-text" textAnchor="start">Low risk ≥ {bands.low}</text>
                     </g>
                 )}
                 {bands && bands.medium < bands.low && (
                     <g>
                         <line x1={padL} x2={w - padR} y1={yFor(bands.medium)} y2={yFor(bands.medium)} className="fi-band-line fi-band-line--med" />
-                        <text x={w - padR} y={yFor(bands.medium) - 3} className="fi-band-text" textAnchor="end">Medium ≥ {bands.medium}</text>
+                        <text x={padL + 4} y={yFor(bands.medium) - 3} className="fi-band-text" textAnchor="start">Medium ≥ {bands.medium}</text>
                     </g>
                 )}
             </svg>

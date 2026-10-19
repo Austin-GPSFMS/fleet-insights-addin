@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {
     buildPeriods, bucketIndex, normalizeConfig, normalizeWeights, scoreFor, subScoreFor, rateFor, bandFor, trendPct, median,
-    aggregate, sumSeries, summarize, ruleBreakdown, buildGroupTree, groupRollup, devicesUnder, breadcrumb
+    aggregate, sumSeries, summarize, ruleBreakdown, buildGroupTree, groupRollup, devicesUnder, breadcrumb, scorableDevices
 } from "../src/model.js";
 
 let passed = 0;
@@ -157,6 +157,42 @@ test("group tree rollup and drill", () => {
     assert.ok(Math.abs(rows[1].current - 96.8) < 1e-9);
     assert.equal(devicesUnder("gA", tree, devices).length, 1);
     assert.deepEqual(breadcrumb("gA1", tree).map(b => b.name), ["Company", "North", "North-Yard"]);
+});
+
+test("summarize / ruleBreakdown at an earlier period index", () => {
+    const d1 = byDevice.get("d1");
+    const s2 = summarize(d1, config, 2);        // period 2: 1 seatbelt in 100 mi → 84
+    assert.ok(Math.abs(s2.current - 84) < 1e-9);
+    assert.equal(s2.currentEvents, 1);
+    const br2 = ruleBreakdown(d1, config, 2);
+    assert.equal(br2.find(r => r.id === "r1").current, 1);
+    assert.equal(br2.find(r => r.id === "r2").current, 0);
+    const br3 = ruleBreakdown(d1, config, 3);
+    assert.equal(br3.find(r => r.id === "r2").current, 1);
+    assert.equal(br3.find(r => r.id === "r1").previous, 1);
+});
+
+test("scorableDevices drops excluded device types and group subtrees", () => {
+    const groups = [
+        { id: "GroupCompanyId", name: "Company", children: [{ id: "gA" }, { id: "gBat" }] },
+        { id: "gA", name: "North", children: [{ id: "gA1" }] },
+        { id: "gA1", name: "North-Yard", children: [] },
+        { id: "gBat", name: "Battery Trackers", children: [] }
+    ];
+    const tree = buildGroupTree(groups);
+    const devs = [
+        { id: "v1", deviceType: "GO9", groups: [{ id: "gA1" }] },
+        { id: "v2", deviceType: "GO9B", groups: [{ id: "gA" }] },
+        { id: "t1", deviceType: "GoAnywhere", groups: [{ id: "gBat" }] },
+        { id: "u1", deviceType: "None", groups: [{ id: "gA" }] },
+        { id: "u2", groups: [{ id: "gA" }] } // missing type → treated as None
+    ];
+    const def = normalizeConfig({ version: 2 });
+    assert.deepEqual(scorableDevices(devs, def, tree).map(d => d.id), ["v1", "v2"]);
+    const exclNorthYard = normalizeConfig({ version: 2, excludedDeviceTypes: [], excludedGroups: ["gA1"] });
+    assert.deepEqual(scorableDevices(devs, exclNorthYard, tree).map(d => d.id), ["v2", "t1", "u1", "u2"]);
+    const exclNorth = normalizeConfig({ version: 2, excludedGroups: ["gA"] });
+    assert.deepEqual(scorableDevices(devs, exclNorth, tree).map(d => d.id), []);
 });
 
 console.log(`\n${passed} tests passed`);

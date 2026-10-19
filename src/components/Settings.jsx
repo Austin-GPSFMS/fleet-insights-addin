@@ -1,13 +1,37 @@
 import { useMemo, useState } from "react";
 import { Button } from "@geotab/zenith/dist/button/button";
 import { Banner } from "@geotab/zenith/dist/banner/banner";
-import { normalizeConfig, normalizeWeights, weightTotal, suggestMaxRate, suggestRelativeWeight, WEIGHT_SUGGESTIONS } from "../model.js";
+import { normalizeConfig, normalizeWeights, weightTotal, suggestMaxRate, suggestRelativeWeight, WEIGHT_SUGGESTIONS, DEVICE_TYPE_LABELS, ROOT_GROUP_ID } from "../model.js";
 
-export function Settings({ config, rules, onSave, onCancel, saving, saveInfo, hiddenCount = 0, onClearHidden }) {
+export function Settings({ config, rules, devices = [], groups = [], tree, onSave, onCancel, saving, saveInfo, hiddenCount = 0, onClearHidden }) {
     const [draft, setDraft] = useState(() => JSON.parse(JSON.stringify(config)));
     const [query, setQuery] = useState("");
     const [error, setError] = useState(null);
     const [showAdvanced, setShowAdvanced] = useState(false);
+    const [groupQuery, setGroupQuery] = useState("");
+
+    // Device types present in this database, with counts, so the exclusion list is concrete.
+    const typeCounts = useMemo(() => {
+        const m = new Map();
+        for (const d of devices) { const t = String(d.deviceType || "None"); m.set(t, (m.get(t) || 0) + 1); }
+        for (const t of draft.excludedDeviceTypes || []) if (!m.has(t)) m.set(t, 0);
+        return [...m.entries()].sort((a, b) => b[1] - a[1]);
+    }, [devices, draft.excludedDeviceTypes]);
+    const excludedTypes = useMemo(() => new Set(draft.excludedDeviceTypes || []), [draft.excludedDeviceTypes]);
+    const toggleType = t => setDraft({ ...draft, excludedDeviceTypes: excludedTypes.has(t) ? (draft.excludedDeviceTypes || []).filter(x => x !== t) : [...(draft.excludedDeviceTypes || []), t] });
+
+    const excludedGroups = useMemo(() => new Set(draft.excludedGroups || []), [draft.excludedGroups]);
+    const groupRows = useMemo(() => {
+        const q = groupQuery.trim().toLowerCase();
+        const counts = new Map();
+        for (const d of devices) for (const g of d.groups || []) counts.set(g.id, (counts.get(g.id) || 0) + 1);
+        return groups
+            .filter(g => g.id !== ROOT_GROUP_ID && (!q || String(g.name).toLowerCase().includes(q)))
+            .map(g => ({ id: g.id, name: g.name, direct: counts.get(g.id) || 0, path: tree ? pathOf(g.id, tree) : g.name }))
+            .sort((a, b) => a.path.localeCompare(b.path));
+    }, [groups, devices, groupQuery, tree]);
+    const toggleGroup = id => setDraft({ ...draft, excludedGroups: excludedGroups.has(id) ? (draft.excludedGroups || []).filter(x => x !== id) : [...(draft.excludedGroups || []), id] });
+    const scorableCount = useMemo(() => devices.filter(d => !excludedTypes.has(String(d.deviceType || "None")) && !(d.groups || []).some(g => excludedGroups.has(g.id) || (tree && [...excludedGroups].some(x => tree.descendants(x).has(g.id))))).length, [devices, excludedTypes, excludedGroups, tree]);
 
     const selected = useMemo(() => new Map(draft.rules.map(r => [r.id, r])), [draft.rules]);
     const visibleRules = useMemo(() => {
@@ -149,6 +173,34 @@ export function Settings({ config, rules, onSave, onCancel, saving, saveInfo, hi
                         <code>score = Σ rule score × weight ÷ 100</code>
                         <p className="fi-muted">Higher is better; 100 means no tracked events. Distance comes from MyGeotab trips in the same period, so 10 events over 10,000 {unitShort} scores far better than 10 events over 100 {unitShort}. Trend compares the current period with the one before it.</p>
                     </div>
+                    <div className="fi-formula">
+                        <h5>Assets to score <span className="fi-muted">— {scorableCount.toLocaleString()} of {devices.length.toLocaleString()} devices</span></h5>
+                        <p className="fi-muted fi-small">Untick a device type to leave it out of every score and table (untracked assets and battery trackers are out by default).</p>
+                        <ul className="fi-types">
+                            {typeCounts.map(([t, c]) => (
+                                <li key={t}>
+                                    <label>
+                                        <input type="checkbox" checked={!excludedTypes.has(t)} onChange={() => toggleType(t)} />
+                                        <span>{DEVICE_TYPE_LABELS[t] || t}<span className="fi-muted"> · {c}</span></span>
+                                    </label>
+                                </li>
+                            ))}
+                        </ul>
+                        <p className="fi-muted fi-small" style={{ marginTop: 10 }}>Exclude whole groups (and their sub-groups) — e.g. a yard, spares, or a trailer pool:</p>
+                        <input className="fi-input" placeholder={`Search ${groups.length} groups…`} value={groupQuery} onChange={e => setGroupQuery(e.target.value)} />
+                        <ul className="fi-group-list">
+                            {groupRows.slice(0, 200).map(g => (
+                                <li key={g.id}>
+                                    <label>
+                                        <input type="checkbox" checked={excludedGroups.has(g.id)} onChange={() => toggleGroup(g.id)} />
+                                        <span>{g.path}<span className="fi-muted"> · {g.direct} direct</span></span>
+                                    </label>
+                                </li>
+                            ))}
+                            {groupRows.length === 0 && <li className="fi-muted">No groups match.</li>}
+                        </ul>
+                        {excludedGroups.size > 0 && <p className="fi-small">Excluded: {[...excludedGroups].map(id => (groups.find(g => g.id === id) || {}).name || id).join(", ")}</p>}
+                    </div>
                     {hiddenCount > 0 && (
                         <div className="fi-formula">
                             <h5>Locally hidden events</h5>
@@ -160,4 +212,15 @@ export function Settings({ config, rules, onSave, onCancel, saving, saveInfo, hi
             </div>
         </div>
     );
+}
+
+function pathOf(id, tree) {
+    const parts = [];
+    let cur = id;
+    while (cur && cur !== ROOT_GROUP_ID) {
+        const g = tree.byId.get(cur);
+        parts.unshift(g ? g.name : cur);
+        cur = tree.parentOf.get(cur);
+    }
+    return parts.join(" / ");
 }

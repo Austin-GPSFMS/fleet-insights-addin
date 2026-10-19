@@ -3,7 +3,7 @@ import { Button } from "@geotab/zenith/dist/button/button";
 import { Banner } from "@geotab/zenith/dist/banner/banner";
 import { Waiting } from "@geotab/zenith/dist/waiting/waiting";
 import { EmptyState } from "@geotab/zenith/dist/emptyState/emptyState";
-import { buildPeriods, aggregate, buildGroupTree, ROOT_GROUP_ID, normalizeConfig } from "./model.js";
+import { buildPeriods, aggregate, buildGroupTree, scorableDevices, ROOT_GROUP_ID, normalizeConfig, PERIOD_DAYS } from "./model.js";
 import { loadReferenceData, loadExceptions, loadTrips, loadConfig, saveConfig, loadHidden, saveHidden, dismissException, friendlyError } from "./api.js";
 import { Dashboard, periodLabel } from "./components/Dashboard.jsx";
 import { Settings } from "./components/Settings.jsx";
@@ -24,6 +24,10 @@ export default function App({ api, groupFilter, focusNonce }) {
     const [saveInfo, setSaveInfo] = useState(null);
     const [asOf, setAsOf] = useState(null);
     const [toast, setToast] = useState(null);
+    // View-only overrides of the saved period settings (not persisted until saved in Settings).
+    const [viewPeriod, setViewPeriod] = useState(null);     // "day" | "week" | "month"
+    const [viewPeriods, setViewPeriods] = useState(null);   // count
+    const [endDate, setEndDate] = useState(() => toDateInput(new Date()));
     const runId = useRef(0);
 
     const notify = useCallback((text, tone = "info") => {
@@ -80,11 +84,31 @@ export default function App({ api, groupFilter, focusNonce }) {
         return () => { cancelled = true; };
     }, [api, groupKey, focusNonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    /* ---- effective config (saved settings + view overrides) ---- */
+    const effConfig = useMemo(() => {
+        if (!config) return null;
+        const period = viewPeriod && PERIOD_DAYS[viewPeriod] ? viewPeriod : config.period;
+        const periods = Math.min(26, Math.max(2, Number(viewPeriods) || config.periods));
+        return { ...config, period, periods };
+    }, [config, viewPeriod, viewPeriods]);
+
+    const endAt = useMemo(() => {
+        const d = fromDateInput(endDate);
+        return d && d.getTime() <= Date.now() + 86400000 ? d : new Date();
+    }, [endDate]);
+
+    /* ---- scorable devices (excluded types / groups removed) ---- */
+    const scopedRef = useMemo(() => {
+        if (!refData || !config) return null;
+        const devices = scorableDevices(refData.devices, config, refData.tree);
+        return { ...refData, devices, allDevices: refData.devices, devicesById: new Map(devices.map(d => [d.id, d])) };
+    }, [refData, config]);
+
     /* ---- events + trips ---- */
-    const periods = useMemo(() => config ? buildPeriods(new Date(), config.period, config.periods) : [], [config]);
+    const periods = useMemo(() => effConfig ? buildPeriods(endAt, effConfig.period, effConfig.periods) : [], [effConfig, endAt]);
 
     const refresh = useCallback(async () => {
-        if (!config || !refData || !config.rules.length) return;
+        if (!config || !refData || !config.rules.length || !periods.length) return;
         const myRun = ++runId.current;
         setLoading(true);
         setError(null);
@@ -105,18 +129,18 @@ export default function App({ api, groupFilter, focusNonce }) {
         }
     }, [api, config, refData, periods, groupFilter]);
 
-    const configKey = config ? JSON.stringify([config.rules.map(r => r.id), config.period, config.periods]) : "";
+    const configKey = effConfig ? JSON.stringify([effConfig.rules.map(r => r.id), effConfig.period, effConfig.periods, periods.length ? periods[0].start : 0, periods.length ? periods[periods.length - 1].end : 0]) : "";
     useEffect(() => { refresh(); }, [configKey, refData]); // eslint-disable-line react-hooks/exhaustive-deps
 
     /* ---- derived: aggregate (cheap; re-runs when weights, hidden list or raw data change) ---- */
     const data = useMemo(() => {
-        if (!raw || !refData || !config) return null;
+        if (!raw || !scopedRef || !effConfig) return null;
         const hiddenIds = new Set(hidden.ids.map(h => h.id));
         const exceptions = hiddenIds.size ? raw.exceptions.filter(e => !hiddenIds.has(e.id)) : raw.exceptions;
-        const deviceIds = new Set(refData.devices.map(d => d.id));
-        const agg = aggregate({ periods, config, exceptions, trips: raw.trips, deviceIds });
+        const deviceIds = new Set(scopedRef.devices.map(d => d.id));
+        const agg = aggregate({ periods, config: effConfig, exceptions, trips: raw.trips, deviceIds });
         return { ...agg, exceptions, trips: raw.trips };
-    }, [raw, refData, config, periods, hidden]);
+    }, [raw, scopedRef, effConfig, periods, hidden]);
 
     /* ---- dismiss ---- */
     const onDismiss = useCallback(async event => {
@@ -149,6 +173,7 @@ export default function App({ api, groupFilter, focusNonce }) {
         try {
             const r = await saveConfig(api, session.database, clean, configMeta.recordId);
             setConfig(normalizeConfig(clean));
+            setViewPeriod(null); setViewPeriods(null);
             setConfigMeta(m => ({ ...m, recordId: r.recordId, source: r.persisted }));
             if (r.persisted === "browser") {
                 setSaveInfo({ type: "warning", text: `Saved in this browser only — the database rejected the write (${r.error}). Users need the AddInData clearance for shared settings.` });
@@ -173,13 +198,27 @@ export default function App({ api, groupFilter, focusNonce }) {
                 <div>
                     <h2 className="fi-title">Fleet Insights <span className="fi-byline">by GPSFMS</span></h2>
                     <div className="fi-sub">
-                        {config && <span>{config.periods} × {periodLabel(config)} · {rangeText}</span>}
+                        {effConfig && <span>{effConfig.periods} × {periodLabel(effConfig)} · {rangeText}</span>}
                         {asOf && <span className="fi-muted"> · updated {asOf.toLocaleTimeString()}</span>}
                         {configMeta.source === "browser" && <span className="fi-muted"> · settings saved in this browser only</span>}
                         {hidden.ids.length > 0 && <span className="fi-muted"> · {hidden.ids.length} event{hidden.ids.length === 1 ? "" : "s"} hidden locally</span>}
                     </div>
                 </div>
                 <div className="fi-actions">
+                    {view === "dashboard" && effConfig && (
+                        <div className="fi-periodbar" title="Change the period without saving — Settings holds the defaults">
+                            <select className="fi-input fi-input--inline" value={effConfig.period} onChange={e => setViewPeriod(e.target.value)} aria-label="Period length">
+                                <option value="day">Daily</option>
+                                <option value="week">Weekly</option>
+                                <option value="month">Monthly</option>
+                            </select>
+                            <span className="fi-muted">×</span>
+                            <input className="fi-input fi-input--inline fi-input--tiny" type="number" min="2" max="26" value={effConfig.periods} onChange={e => setViewPeriods(e.target.value)} aria-label="Number of periods" />
+                            <span className="fi-muted">ending</span>
+                            <input className="fi-input fi-input--inline" type="date" value={endDate} max={toDateInput(new Date())} onChange={e => setEndDate(e.target.value || toDateInput(new Date()))} aria-label="End date" />
+                            {endDate !== toDateInput(new Date()) && <button className="fi-crumb fi-crumb--reset" onClick={() => setEndDate(toDateInput(new Date()))}>Today</button>}
+                        </div>
+                    )}
                     {view === "dashboard" && <Button type="secondary" onClick={refresh} disabled={loading || !config || !config.rules.length}>Refresh</Button>}
                     {view === "dashboard"
                         ? <Button type="primary" onClick={() => { setSaveInfo(null); setView("settings"); }} disabled={!config || !refData}>Settings</Button>
@@ -195,12 +234,13 @@ export default function App({ api, groupFilter, focusNonce }) {
             {(!config || !refData) && !error && <Waiting isLoading description={progress || "Loading…"} />}
 
             {config && refData && view === "settings" && (
-                <Settings config={config} rules={refData.rules} onSave={onSave} saving={saving} saveInfo={saveInfo}
+                <Settings config={config} rules={refData.rules} devices={refData.devices} groups={refData.groups} tree={refData.tree}
+                          onSave={onSave} saving={saving} saveInfo={saveInfo}
                           hiddenCount={hidden.ids.length} onClearHidden={onClearHidden}
                           onCancel={() => { if (config.rules.length) setView("dashboard"); }} />
             )}
 
-            {config && refData && view === "dashboard" && (
+            {config && scopedRef && view === "dashboard" && (
                 config.rules.length === 0
                     ? <EmptyState description="No rules are being tracked yet. Open Settings to choose the exception rules and their weights." />
                     : loading && !data
@@ -208,7 +248,7 @@ export default function App({ api, groupFilter, focusNonce }) {
                         : data
                             ? <>
                                 {loading && <div className="fi-progress">{progress || "Refreshing…"}</div>}
-                                <Dashboard config={config} periods={periods} refData={refData} data={data}
+                                <Dashboard config={effConfig} periods={periods} refData={scopedRef} data={data}
                                            nodeId={nodeId} setNodeId={setNodeId} session={session} onDismiss={onDismiss} notify={notify} />
                               </>
                             : null
@@ -217,4 +257,15 @@ export default function App({ api, groupFilter, focusNonce }) {
             {toast && <div className={`fi-toast ${toast.tone === "warn" ? "fi-toast--warn" : ""}`} role="status">{toast.text}</div>}
         </div>
     );
+}
+
+function toDateInput(d) {
+    const pad = v => String(v).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+function fromDateInput(str) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str || "");
+    if (!m) return null;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0);
+    return Number.isNaN(d.getTime()) ? null : d;
 }

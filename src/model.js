@@ -19,8 +19,33 @@ export const DEFAULT_CONFIG = Object.freeze({
     periods: 8,                // number of trailing periods to show
     unit: "miles",             // exposure + display unit: rates are per 1,000 mi or per 1,000 km
     minDistance: 10,           // minimum distance (in `unit`) in a period before a subject is scored
-    bands: { low: 90, medium: 75 } // score ≥ low → Low risk; ≥ medium → Medium; else High
+    bands: { low: 90, medium: 75 }, // score ≥ low → Low risk; ≥ medium → Medium; else High
+    // Device types that are not driven vehicles — untracked assets (None), battery trackers
+    // (GO Anywhere family), third-party and GoDrive-only devices. Editable in Settings.
+    excludedDeviceTypes: ["None", "GoAnywhere", "GoAnywhereLite", "Gemini", "CustomDevice", "GoDriveDevice", "OldGeotab"],
+    excludedGroups: []         // group ids whose whole subtree is left out of scoring
 });
+
+export const DEVICE_TYPE_LABELS = {
+    None: "Untracked asset (no device)", GoAnywhere: "GO Anywhere (battery tracker)", GoAnywhereLite: "GO Anywhere Next Gen (battery tracker)",
+    Gemini: "GO Anywhere Plus (battery tracker)", CustomDevice: "Custom / third-party device", CustomVehicleDevice: "Custom vehicle device",
+    GoDriveDevice: "GoDrive mobile device", OldGeotab: "Legacy GEOTAB unit"
+};
+
+/** Devices that should be scored: not an excluded type and not in an excluded group subtree. */
+export function scorableDevices(devices, config, tree) {
+    const types = new Set(config.excludedDeviceTypes || []);
+    const excludedGroupSet = new Set();
+    for (const gid of config.excludedGroups || []) {
+        if (tree && tree.byId.has(gid)) for (const x of tree.descendants(gid)) excludedGroupSet.add(x);
+        else excludedGroupSet.add(gid);
+    }
+    return devices.filter(d => {
+        if (types.has(String(d.deviceType || "None"))) return false;
+        if (excludedGroupSet.size && (d.groups || []).some(g => excludedGroupSet.has(g.id))) return false;
+        return true;
+    });
+}
 
 export const PERIOD_DAYS = { day: 1, week: 7, month: 30 };
 const KM_PER_MILE = 1.60934;
@@ -112,6 +137,8 @@ export function normalizeConfig(raw) {
     const looksV1 = raw && raw.version !== 2 && num(rb.low, 90) < num(rb.medium, 75);
     c.bands = looksV1 ? { ...DEFAULT_CONFIG.bands } : { low: clamp(num(rb.low, 90), 0, 100), medium: clamp(num(rb.medium, 75), 0, 100) };
     if (c.bands.medium > c.bands.low) c.bands.medium = c.bands.low;
+    c.excludedDeviceTypes = Array.isArray(c.excludedDeviceTypes) ? c.excludedDeviceTypes.map(String) : [...DEFAULT_CONFIG.excludedDeviceTypes];
+    c.excludedGroups = Array.isArray(c.excludedGroups) ? c.excludedGroups.map(String) : [];
     c.version = 2;
     delete c.normalization;
     return c;
@@ -327,13 +354,14 @@ export function scoreSeries(series, config) {
     return series.counts.map((counts, i) => scoreFor(counts, series.distanceKm[i], config, series.engineHours[i]));
 }
 
-/** Row summary for tables: current score, previous, trend, band, totals. */
-export function summarize(series, config) {
+/** Row summary for tables: score at period `idx` (default: latest), previous, trend, band, totals. */
+export function summarize(series, config, idx) {
     const scores = scoreSeries(series, config);
     const n = scores.length;
-    const current = scores[n - 1];
-    const previous = n > 1 ? scores[n - 2] : null;
-    const currentCounts = series.counts[n - 1];
+    const i = idx == null ? n - 1 : Math.min(Math.max(idx, 0), n - 1);
+    const current = scores[i];
+    const previous = i > 0 ? scores[i - 1] : null;
+    const currentCounts = series.counts[i] || {};
     return {
         scores,
         current,
@@ -343,7 +371,7 @@ export function summarize(series, config) {
         band: bandFor(current, config),
         currentEvents: Object.values(currentCounts).reduce((a, b) => a + b, 0),
         currentPoints: pointsFor(currentCounts, config),
-        currentDistanceKm: series.distanceKm[n - 1],
+        currentDistanceKm: series.distanceKm[i] || 0,
         totalEvents: series.events,
         totalDistanceKm: series.distanceKm.reduce((a, b) => a + b, 0),
         totalPoints: series.counts.reduce((a, c) => a + pointsFor(c, config), 0)
@@ -351,12 +379,13 @@ export function summarize(series, config) {
 }
 
 /** Per-rule totals for the current vs previous period across a set of series. */
-export function ruleBreakdown(series, config) {
+export function ruleBreakdown(series, config, idx) {
     const n = series.counts.length;
-    const cur = series.counts[n - 1] || {};
-    const prev = n > 1 ? series.counts[n - 2] || {} : {};
-    const curKm = series.distanceKm[n - 1] || 0;
-    const prevKm = n > 1 ? series.distanceKm[n - 2] || 0 : 0;
+    const i = idx == null ? n - 1 : Math.min(Math.max(idx, 0), n - 1);
+    const cur = series.counts[i] || {};
+    const prev = i > 0 ? series.counts[i - 1] || {} : {};
+    const curKm = series.distanceKm[i] || 0;
+    const prevKm = i > 0 ? series.distanceKm[i - 1] || 0 : 0;
     return config.rules.map(r => {
         const c = cur[r.id] || 0, p = prev[r.id] || 0;
         const sub = subScoreFor(c, curKm, r, config);

@@ -60,7 +60,7 @@ export async function loadReferenceData(api, groupFilter) {
     const now = new Date().toISOString();
     const [devices, allGroups, rules, drivers] = await Promise.all([
         getWithSelector(api, "Device", { fromDate: now, ...(groups ? { groups } : {}) },
-            ["id", "name", "groups", "serialNumber", "licensePlate", "vehicleIdentificationNumber"]),
+            ["id", "name", "groups", "serialNumber", "licensePlate", "vehicleIdentificationNumber", "deviceType"]),
         getWithSelector(api, "Group", {}, ["id", "name", "children", "color"]),
         getWithSelector(api, "Rule", {}, ["id", "name", "baseType", "comment"]),
         getWithSelector(api, "User", { isDriver: true }, ["id", "name", "firstName", "lastName", "groups"]).catch(() => [])

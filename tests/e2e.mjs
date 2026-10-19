@@ -72,6 +72,26 @@ const fleetScore = parseInt(kpis[0], 10);
 if (!(fleetScore >= 0 && fleetScore <= 100)) throw new Error("fleet score not on 0–100 scale");
 await page.screenshot({ path: join(here, "shots/02-dashboard.png"), fullPage: true });
 
+// Excluded device types: 60 GO9 trucks only — no battery trackers / untracked assets, no "Battery Trackers" group.
+const vehTab = await page.$eval(".fi-tab:has-text('Vehicles')", e => e.textContent);
+log("vehicles tab:", vehTab);
+if (!/\(60\)/.test(vehTab)) throw new Error("battery trackers / untracked assets should be excluded from scoring");
+const groupNames = await page.$$eval(".fi-perf tbody tr td:first-child", tds => tds.map(t => t.textContent));
+if (groupNames.some(g => /Battery/.test(g))) throw new Error("Battery Trackers group should not appear");
+
+// Period selector: switch to monthly × 3 ending Sep 30 → chart has 3 bars and the range text changes.
+await page.selectOption(".fi-periodbar select", "month");
+await page.fill(".fi-periodbar input[type=number]", "3");
+await page.fill(".fi-periodbar input[type=date]", "2026-09-30");
+await page.waitForFunction(() => document.querySelectorAll(".fi-dash .fi-bar-group").length === 3, null, { timeout: 60000 });
+const subText = await page.$eval(".fi-sub", e => e.textContent);
+log("period selector:", subText.slice(0, 60));
+if (!/3 × 30 days/.test(subText) || !/9\/30\/2026/.test(subText)) throw new Error("period selector did not apply");
+await page.click("button:has-text('Today')");
+await page.selectOption(".fi-periodbar select", "week");
+await page.fill(".fi-periodbar input[type=number]", "8");
+await page.waitForFunction(() => document.querySelectorAll(".fi-dash .fi-bar-group").length === 8, null, { timeout: 60000 });
+
 // Worst group first (default sort ascending by score) → Private Assets.
 const firstGroup = await page.$eval(".fi-perf tbody tr td", td => td.textContent);
 log("worst group:", firstGroup);
@@ -104,8 +124,15 @@ if (!sets.length || sets[0].state !== "ExceptionEventStateDismissedId") throw ne
 if (!(after < before)) throw new Error("dismissed event still listed");
 if (scoreAfter < scoreBefore) throw new Error("score should not drop after dismissing an event");
 await page.screenshot({ path: join(here, "shots/03-vehicle-drawer.png"), fullPage: true });
+const ruleMixBefore = await page.$eval(".fi-drawer .fi-card--flat:nth-of-type(3) tbody", e => e.textContent);
 await page.click(".fi-drawer .fi-bar-group >> nth=0");
 await page.waitForSelector(".fi-drawer h4:has-text('period starting')");
+const kpiTitle = await page.$eval(".fi-drawer .fi-kpi-title", e => e.textContent);
+const ruleMixAfter = await page.$eval(".fi-drawer .fi-card--flat:nth-of-type(3) tbody", e => e.textContent);
+log("drawer period switch → kpi:", kpiTitle, "| rule mix changed:", ruleMixBefore !== ruleMixAfter);
+if (!/period starting/.test(kpiTitle) || ruleMixBefore === ruleMixAfter) throw new Error("drawer KPIs / rule mix did not follow the selected period");
+await page.click("button:has-text('Back to current')");
+await page.waitForSelector(".fi-drawer .fi-kpi-title:has-text('Current score')");
 await page.keyboard.press("Escape");
 await page.waitForSelector(".fi-drawer", { state: "detached" });
 
