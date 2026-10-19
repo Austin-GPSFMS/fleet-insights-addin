@@ -119,8 +119,13 @@ window.geotab = {};
             default: throw new Error("Unsupported typeName " + p.typeName);
         }
     }
+    function applySelector(rows, p) {
+        if (!p.propertySelector || !Array.isArray(p.propertySelector.fields) || !p.propertySelector.isIncluded) return rows;
+        const keep = new Set(p.propertySelector.fields.filter(f => f !== "deviceType")); // server never returns the discriminator this way
+        return rows.map(r => { const o = {}; for (const k of keep) if (k in r) o[k] = r[k]; return o; });
+    }
     function handle(method, p) {
-        if (method === "Get") return handleGet(p);
+        if (method === "Get") return applySelector(handleGet(p), p);
         if (method === "Add") { const id = "aid" + (addInData.length + 1); addInData.push({ ...p.entity, id }); return id; }
         if (method === "Set" && p.typeName === "ExceptionEvent") {
             window.__mock.sets.push(p);

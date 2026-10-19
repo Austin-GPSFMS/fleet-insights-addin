@@ -59,8 +59,10 @@ export async function loadReferenceData(api, groupFilter) {
     const groups = groupFilter && groupFilter.length ? groupFilter.map(g => ({ id: g.id })) : undefined;
     const now = new Date().toISOString();
     const [devices, allGroups, rules, drivers] = await Promise.all([
-        getWithSelector(api, "Device", { fromDate: now, ...(groups ? { groups } : {}) },
-            ["id", "name", "groups", "serialNumber", "licensePlate", "vehicleIdentificationNumber", "deviceType"]),
+        // No propertySelector on Device: `deviceType` is the JSON type discriminator and is NOT
+        // returned when a field list is supplied (observed on ilbinc — every device came back
+        // typeless and was excluded as "None"). Full Device records are ~2 KB each; fine.
+        call(api, "Get", { typeName: "Device", search: { fromDate: now, ...(groups ? { groups } : {}) }, resultsLimit: RESULTS_LIMIT }),
         getWithSelector(api, "Group", {}, ["id", "name", "children", "color"]),
         getWithSelector(api, "Rule", {}, ["id", "name", "baseType", "comment"]),
         getWithSelector(api, "User", { isDriver: true }, ["id", "name", "firstName", "lastName", "groups"]).catch(() => [])

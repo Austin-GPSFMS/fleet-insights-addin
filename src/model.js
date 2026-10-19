@@ -26,6 +26,11 @@ export const DEFAULT_CONFIG = Object.freeze({
     excludedGroups: []         // group ids whose whole subtree is left out of scoring
 });
 
+export function isUntrackedSerial(serial) {
+    const sn = String(serial || "").trim();
+    return sn === "" || /^0+(-0+)*$/.test(sn);
+}
+
 export const DEVICE_TYPE_LABELS = {
     None: "Untracked asset (no device)", GoAnywhere: "GO Anywhere (battery tracker)", GoAnywhereLite: "GO Anywhere Next Gen (battery tracker)",
     Gemini: "GO Anywhere Plus (battery tracker)", CustomDevice: "Custom / third-party device", CustomVehicleDevice: "Custom vehicle device",
@@ -41,7 +46,9 @@ export function scorableDevices(devices, config, tree) {
         else excludedGroupSet.add(gid);
     }
     return devices.filter(d => {
-        if (types.has(String(d.deviceType || "None"))) return false;
+        // Unknown type (field missing) → keep, unless it is clearly an untracked asset (no serial).
+        const type = d.deviceType != null ? String(d.deviceType) : (isUntrackedSerial(d.serialNumber) ? "None" : "Unknown");
+        if (types.has(type)) return false;
         if (excludedGroupSet.size && (d.groups || []).some(g => excludedGroupSet.has(g.id))) return false;
         return true;
     });

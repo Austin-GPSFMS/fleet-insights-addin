@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Button } from "@geotab/zenith/dist/button/button";
 import { Banner } from "@geotab/zenith/dist/banner/banner";
-import { normalizeConfig, normalizeWeights, weightTotal, suggestMaxRate, suggestRelativeWeight, WEIGHT_SUGGESTIONS, DEVICE_TYPE_LABELS, ROOT_GROUP_ID } from "../model.js";
+import { normalizeConfig, normalizeWeights, weightTotal, suggestMaxRate, suggestRelativeWeight, WEIGHT_SUGGESTIONS, DEVICE_TYPE_LABELS, ROOT_GROUP_ID, isUntrackedSerial } from "../model.js";
 
 export function Settings({ config, rules, devices = [], groups = [], tree, onSave, onCancel, saving, saveInfo, hiddenCount = 0, onClearHidden }) {
     const [draft, setDraft] = useState(() => JSON.parse(JSON.stringify(config)));
@@ -13,7 +13,7 @@ export function Settings({ config, rules, devices = [], groups = [], tree, onSav
     // Device types present in this database, with counts, so the exclusion list is concrete.
     const typeCounts = useMemo(() => {
         const m = new Map();
-        for (const d of devices) { const t = String(d.deviceType || "None"); m.set(t, (m.get(t) || 0) + 1); }
+        for (const d of devices) { const t = typeOf(d); m.set(t, (m.get(t) || 0) + 1); }
         for (const t of draft.excludedDeviceTypes || []) if (!m.has(t)) m.set(t, 0);
         return [...m.entries()].sort((a, b) => b[1] - a[1]);
     }, [devices, draft.excludedDeviceTypes]);
@@ -31,7 +31,7 @@ export function Settings({ config, rules, devices = [], groups = [], tree, onSav
             .sort((a, b) => a.path.localeCompare(b.path));
     }, [groups, devices, groupQuery, tree]);
     const toggleGroup = id => setDraft({ ...draft, excludedGroups: excludedGroups.has(id) ? (draft.excludedGroups || []).filter(x => x !== id) : [...(draft.excludedGroups || []), id] });
-    const scorableCount = useMemo(() => devices.filter(d => !excludedTypes.has(String(d.deviceType || "None")) && !(d.groups || []).some(g => excludedGroups.has(g.id) || (tree && [...excludedGroups].some(x => tree.descendants(x).has(g.id))))).length, [devices, excludedTypes, excludedGroups, tree]);
+    const scorableCount = useMemo(() => devices.filter(d => !excludedTypes.has(typeOf(d)) && !(d.groups || []).some(g => excludedGroups.has(g.id) || (tree && [...excludedGroups].some(x => tree.descendants(x).has(g.id))))).length, [devices, excludedTypes, excludedGroups, tree]);
 
     const selected = useMemo(() => new Map(draft.rules.map(r => [r.id, r])), [draft.rules]);
     const visibleRules = useMemo(() => {
@@ -223,4 +223,8 @@ function pathOf(id, tree) {
         cur = tree.parentOf.get(cur);
     }
     return parts.join(" / ");
+}
+
+function typeOf(d) {
+    return d.deviceType != null ? String(d.deviceType) : (isUntrackedSerial(d.serialNumber) ? "None" : "Unknown");
 }

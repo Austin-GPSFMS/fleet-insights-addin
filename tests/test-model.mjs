@@ -185,12 +185,13 @@ test("scorableDevices drops excluded device types and group subtrees", () => {
         { id: "v2", deviceType: "GO9B", groups: [{ id: "gA" }] },
         { id: "t1", deviceType: "GoAnywhere", groups: [{ id: "gBat" }] },
         { id: "u1", deviceType: "None", groups: [{ id: "gA" }] },
-        { id: "u2", groups: [{ id: "gA" }] } // missing type → treated as None
+        { id: "u2", serialNumber: "", groups: [{ id: "gA" }] },          // missing type, no serial → untracked
+        { id: "v3", serialNumber: "G9ABC123", groups: [{ id: "gA" }] }     // missing type, real serial → kept
     ];
     const def = normalizeConfig({ version: 2 });
-    assert.deepEqual(scorableDevices(devs, def, tree).map(d => d.id), ["v1", "v2"]);
+    assert.deepEqual(scorableDevices(devs, def, tree).map(d => d.id), ["v1", "v2", "v3"]);
     const exclNorthYard = normalizeConfig({ version: 2, excludedDeviceTypes: [], excludedGroups: ["gA1"] });
-    assert.deepEqual(scorableDevices(devs, exclNorthYard, tree).map(d => d.id), ["v2", "t1", "u1", "u2"]);
+    assert.deepEqual(scorableDevices(devs, exclNorthYard, tree).map(d => d.id), ["v2", "t1", "u1", "u2", "v3"]);
     const exclNorth = normalizeConfig({ version: 2, excludedGroups: ["gA"] });
     assert.deepEqual(scorableDevices(devs, exclNorth, tree).map(d => d.id), []);
 });
