@@ -19,16 +19,41 @@ const config = normalizeConfig({
     period: "week", periods: 4, unit: "miles", minDistance: 10, bands: { low: 90, medium: 75 }
 });
 
-test("periods are contiguous, oldest first, last ends today", () => {
-    const end = new Date(2026, 9, 15, 12, 0, 0);
-    const p = buildPeriods(end, "week", 4);
+test("periods are calendar-aligned, contiguous, oldest first; only the last is partial", () => {
+    // Mon 2026-10-19 12:00 — weeks starting Monday
+    const end = new Date(2026, 9, 19, 12, 0, 0);
+    const p = buildPeriods(end, "week", 4, 1);
     assert.equal(p.length, 4);
     for (let i = 1; i < p.length; i++) assert.equal(p[i].start, p[i - 1].end + 1);
-    assert.equal(new Date(p[3].end).getDate(), 15);
-    assert.equal(new Date(p[3].start).getDate(), 9);
-    assert.equal(bucketIndex(p, new Date(2026, 9, 10).getTime()), 3);
-    assert.equal(bucketIndex(p, new Date(2026, 8, 20).getTime()), 0);
-    assert.equal(bucketIndex(p, new Date(2026, 7, 1).getTime()), -1);
+    assert.deepEqual(p.map(x => x.partial), [false, false, false, true]);
+    // current week starts Mon Oct 19 00:00 and ends at the end of "today"
+    assert.equal(new Date(p[3].start).getDate(), 19);
+    assert.equal(new Date(p[3].start).getDay(), 1);
+    assert.equal(new Date(p[3].end).getDate(), 19);
+    // previous full weeks: Oct 12–18, Oct 5–11, Sep 28–Oct 4
+    assert.equal(new Date(p[2].start).getDate(), 12);
+    assert.equal(new Date(p[2].end).getDate(), 18);
+    assert.equal(new Date(p[0].start).getMonth(), 8);
+    assert.equal(new Date(p[0].start).getDate(), 28);
+    // Sunday-start weeks: current week starts Sun Oct 18
+    const ps = buildPeriods(end, "week", 2, 0);
+    assert.equal(new Date(ps[1].start).getDate(), 18);
+    assert.equal(new Date(ps[1].start).getDay(), 0);
+    // Stability: the same completed week has identical bounds whether viewed Monday or Thursday
+    const thu = buildPeriods(new Date(2026, 9, 22, 9, 0, 0), "week", 4, 1);
+    assert.equal(thu[2].start, p[2].start);
+    assert.equal(thu[2].end, p[2].end);
+    assert.equal(thu[3].start, p[3].start); // same current week, just longer
+    assert.ok(thu[3].end > p[3].end);
+    // Months: Oct (to date), Sep, Aug
+    const pm = buildPeriods(end, "month", 3, 1);
+    assert.deepEqual(pm.map(x => new Date(x.start).getMonth()), [7, 8, 9]);
+    assert.equal(new Date(pm[1].end).getDate(), 30);
+    // Days
+    const pd = buildPeriods(end, "day", 3, 1);
+    assert.deepEqual(pd.map(x => new Date(x.start).getDate()), [17, 18, 19]);
+    assert.equal(bucketIndex(p, new Date(2026, 9, 15).getTime()), 2);
+    assert.equal(bucketIndex(p, new Date(2026, 8, 20).getTime()), -1);
 });
 
 test("config: weights normalize to 100, v1 points/bands migrate, clamps", () => {
@@ -78,7 +103,7 @@ test("trend and median", () => {
     assert.equal(median([]), null);
 });
 
-const periods = buildPeriods(new Date(2026, 9, 15), "week", 4);
+const periods = buildPeriods(new Date(2026, 9, 15), "week", 4, 1);
 const t = (periodIdx, dayOffset = 1) => new Date(periods[periodIdx].start + dayOffset * 3600000).toISOString();
 const exceptions = [
     { activeFrom: t(3), device: { id: "d1" }, driver: { id: "u1" }, rule: { id: "r1" } },

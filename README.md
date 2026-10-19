@@ -9,10 +9,12 @@ time — by group, drilled down to individual vehicles and drivers.
 session. No proxy, no server, no data leaves Geotab. Settings are stored in the database as
 `AddInData` so every user sees the same score definition.
 
-## What it does (v0.3)
+## What it does (v0.4)
 
-- **Score trend** — safety score **out of 100** per period (trailing 7 / 30 / 1-day windows), last
-  N periods, higher is better, band lines for Low / Medium risk. Distance-normalized by design: 10
+- **Score trend** — safety score **out of 100** per **calendar** period (weeks starting Monday or
+  Sunday, calendar months, or days), last N periods, higher is better, band lines for Low / Medium
+  risk. Completed periods never move as days pass; the last bar is the current period "to date".
+  Click any bar (or "Show last full week") to focus every KPI, table and the rule list on that period. Distance-normalized by design: 10
   events over 10,000 mi scores far better than 10 events over 100 mi.
 - **KPIs** — scope score + risk band, median vehicle score, events / points, distance, each with
   a vs-previous-period trend.
@@ -37,8 +39,6 @@ session. No proxy, no server, no data leaves Geotab. Settings are stored in the 
   worst-first rows banded red/orange by risk, one column per rule, frozen header, autofilter,
   plus a "Scoring model" sheet), **PDF scorecard** (branded landscape print view → Save as PDF),
   and CSV of the on-screen table.
-- **Period selector** in the header — Daily / Weekly / Monthly × N periods, ending on any date
-  (defaults come from Settings; the header changes are view-only).
 - **Assets to score** (Settings) — device types present in the database with counts; untracked
   assets (`None`), GO Anywhere battery trackers (`GoAnywhere`, `GoAnywhereLite`, `Gemini`),
   third-party and GoDrive-only devices are excluded by default. Whole groups (with sub-groups) can be

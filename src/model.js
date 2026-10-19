@@ -23,7 +23,8 @@ export const DEFAULT_CONFIG = Object.freeze({
     // Device types that are not driven vehicles — untracked assets (None), battery trackers
     // (GO Anywhere family), third-party and GoDrive-only devices. Editable in Settings.
     excludedDeviceTypes: ["None", "GoAnywhere", "GoAnywhereLite", "Gemini", "CustomDevice", "GoDriveDevice", "OldGeotab"],
-    excludedGroups: []         // group ids whose whole subtree is left out of scoring
+    excludedGroups: [],        // group ids whose whole subtree is left out of scoring
+    weekStart: 1               // 0 = Sunday, 1 = Monday — first day of the scoring week
 });
 
 export function isUntrackedSerial(serial) {
@@ -146,6 +147,7 @@ export function normalizeConfig(raw) {
     if (c.bands.medium > c.bands.low) c.bands.medium = c.bands.low;
     c.excludedDeviceTypes = Array.isArray(c.excludedDeviceTypes) ? c.excludedDeviceTypes.map(String) : [...DEFAULT_CONFIG.excludedDeviceTypes];
     c.excludedGroups = Array.isArray(c.excludedGroups) ? c.excludedGroups.map(String) : [];
+    c.weekStart = Number(c.weekStart) === 0 ? 0 : 1;
     c.version = 2;
     delete c.normalization;
     return c;
@@ -159,25 +161,54 @@ function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
 
 /* ------------------------------ periods ------------------------------ */
 
-/** Trailing windows ending at the end of `endDate` (local), oldest first. */
-export function buildPeriods(endDate, period, n) {
-    const days = PERIOD_DAYS[period] || 7;
-    const end = new Date(endDate);
-    end.setHours(23, 59, 59, 999);
+/**
+ * Calendar-aligned periods, oldest first, ending with the period that contains `endDate`
+ * (which is therefore partial — "to date"). Completed periods never move as the days pass:
+ *   day   → calendar days
+ *   week  → weeks starting on `weekStart` (0 = Sunday, 1 = Monday)
+ *   month → calendar months
+ * Each period: { start, end, label, partial }. `end` of the current period is the end of today
+ * so the fetch window is right; `partial` flags it for the UI.
+ */
+export function buildPeriods(endDate, period, n, weekStart = 1) {
+    const now = new Date(endDate);
+    now.setHours(23, 59, 59, 999);
     const out = [];
-    let cursorEnd = end.getTime();
+    let curStart = periodStart(now, period, weekStart);
+    let curEnd = now.getTime();
     for (let i = 0; i < n; i++) {
-        const start = new Date(cursorEnd - days * DAY_MS + 1);
-        start.setHours(0, 0, 0, 0);
-        out.unshift({ start: start.getTime(), end: cursorEnd, label: shortDate(start) });
-        cursorEnd = start.getTime() - 1;
+        out.unshift({ start: curStart.getTime(), end: curEnd, label: periodLabelFor(curStart, period), partial: i === 0 });
+        curEnd = curStart.getTime() - 1;
+        curStart = periodStart(new Date(curEnd), period, weekStart);
     }
     return out;
+}
+
+function periodStart(d, period, weekStart) {
+    const s = new Date(d);
+    s.setHours(0, 0, 0, 0);
+    if (period === "week") {
+        const diff = (s.getDay() - weekStart + 7) % 7;
+        s.setDate(s.getDate() - diff);
+    } else if (period === "month") {
+        s.setDate(1);
+    }
+    return s;
+}
+
+function periodLabelFor(start, period) {
+    if (period === "month") return start.toLocaleDateString(undefined, { month: "short", year: "2-digit" });
+    return shortDate(start);
 }
 
 export function shortDate(d) {
     const dt = new Date(d);
     return dt.toLocaleDateString(undefined, { month: "short", day: "2-digit" });
+}
+
+/** "This week (to date)" style label for the partial current period. */
+export function currentPeriodLabel(period) {
+    return period === "day" ? "Today" : period === "month" ? "This month" : "This week";
 }
 
 /** Binary search: index of the period containing t, or -1. */
@@ -450,7 +481,7 @@ export const ROOT_GROUP_ID = "GroupCompanyId";
  * Roll device series up to the children of `nodeId`. Devices that belong to the
  * node directly (not via any child subtree) appear under a synthetic "Direct" row.
  */
-export function groupRollup({ nodeId, tree, devices, byDevice, config, nPeriods }) {
+export function groupRollup({ nodeId, tree, devices, byDevice, config, nPeriods, idx }) {
     const node = tree.byId.get(nodeId);
     const childIds = tree.childrenOf.get(nodeId) || [];
     const rows = [];
@@ -463,13 +494,13 @@ export function groupRollup({ nodeId, tree, devices, byDevice, config, nPeriods 
         rows.push({
             id: cid, name: (tree.byId.get(cid) || {}).name || cid, kind: "group",
             vehicles: members.length, hasChildren: (tree.childrenOf.get(cid) || []).length > 0,
-            series, ...summarize(series, config)
+            series, ...summarize(series, config, idx)
         });
     }
     const direct = devices.filter(d => !assigned.has(d.id) && (d.groups || []).some(g => g.id === nodeId));
     if (direct.length && childIds.length) {
         const series = sumSeries(direct.map(m => byDevice.get(m.id)).filter(Boolean), nPeriods);
-        rows.push({ id: `${nodeId}::direct`, name: `${(node && node.name) || "Group"} (direct)`, kind: "direct", vehicles: direct.length, hasChildren: false, series, ...summarize(series, config) });
+        rows.push({ id: `${nodeId}::direct`, name: `${(node && node.name) || "Group"} (direct)`, kind: "direct", vehicles: direct.length, hasChildren: false, series, ...summarize(series, config, idx) });
     }
     return rows.filter(r => r.vehicles > 0);
 }

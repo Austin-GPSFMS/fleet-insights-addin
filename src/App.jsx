@@ -3,7 +3,7 @@ import { Button } from "@geotab/zenith/dist/button/button";
 import { Banner } from "@geotab/zenith/dist/banner/banner";
 import { Waiting } from "@geotab/zenith/dist/waiting/waiting";
 import { EmptyState } from "@geotab/zenith/dist/emptyState/emptyState";
-import { buildPeriods, aggregate, buildGroupTree, scorableDevices, ROOT_GROUP_ID, normalizeConfig, PERIOD_DAYS } from "./model.js";
+import { buildPeriods, aggregate, buildGroupTree, scorableDevices, ROOT_GROUP_ID, normalizeConfig } from "./model.js";
 import { loadReferenceData, loadExceptions, loadTrips, loadConfig, saveConfig, loadHidden, saveHidden, dismissException, friendlyError } from "./api.js";
 import { Dashboard, periodLabel } from "./components/Dashboard.jsx";
 import { Settings } from "./components/Settings.jsx";
@@ -24,10 +24,6 @@ export default function App({ api, groupFilter, focusNonce }) {
     const [saveInfo, setSaveInfo] = useState(null);
     const [asOf, setAsOf] = useState(null);
     const [toast, setToast] = useState(null);
-    // View-only overrides of the saved period settings (not persisted until saved in Settings).
-    const [viewPeriod, setViewPeriod] = useState(null);     // "day" | "week" | "month"
-    const [viewPeriods, setViewPeriods] = useState(null);   // count
-    const [endDate, setEndDate] = useState(() => toDateInput(new Date()));
     const runId = useRef(0);
 
     const notify = useCallback((text, tone = "info") => {
@@ -84,18 +80,7 @@ export default function App({ api, groupFilter, focusNonce }) {
         return () => { cancelled = true; };
     }, [api, groupKey, focusNonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    /* ---- effective config (saved settings + view overrides) ---- */
-    const effConfig = useMemo(() => {
-        if (!config) return null;
-        const period = viewPeriod && PERIOD_DAYS[viewPeriod] ? viewPeriod : config.period;
-        const periods = Math.min(26, Math.max(2, Number(viewPeriods) || config.periods));
-        return { ...config, period, periods };
-    }, [config, viewPeriod, viewPeriods]);
-
-    const endAt = useMemo(() => {
-        const d = fromDateInput(endDate);
-        return d && d.getTime() <= Date.now() + 86400000 ? d : new Date();
-    }, [endDate]);
+    const effConfig = config;
 
     /* ---- scorable devices (excluded types / groups removed) ---- */
     const scopedRef = useMemo(() => {
@@ -105,7 +90,8 @@ export default function App({ api, groupFilter, focusNonce }) {
     }, [refData, config]);
 
     /* ---- events + trips ---- */
-    const periods = useMemo(() => effConfig ? buildPeriods(endAt, effConfig.period, effConfig.periods) : [], [effConfig, endAt]);
+    // Calendar-aligned: completed weeks/months never shift; only the last ("to date") period grows.
+    const periods = useMemo(() => effConfig ? buildPeriods(new Date(), effConfig.period, effConfig.periods, effConfig.weekStart) : [], [effConfig]);
 
     const refresh = useCallback(async () => {
         if (!config || !refData || !config.rules.length || !periods.length) return;
@@ -173,7 +159,6 @@ export default function App({ api, groupFilter, focusNonce }) {
         try {
             const r = await saveConfig(api, session.database, clean, configMeta.recordId);
             setConfig(normalizeConfig(clean));
-            setViewPeriod(null); setViewPeriods(null);
             setConfigMeta(m => ({ ...m, recordId: r.recordId, source: r.persisted }));
             if (r.persisted === "browser") {
                 setSaveInfo({ type: "warning", text: `Saved in this browser only — the database rejected the write (${r.error}). Users need the AddInData clearance for shared settings.` });
@@ -205,20 +190,6 @@ export default function App({ api, groupFilter, focusNonce }) {
                     </div>
                 </div>
                 <div className="fi-actions">
-                    {view === "dashboard" && effConfig && (
-                        <div className="fi-periodbar" title="Change the period without saving — Settings holds the defaults">
-                            <select className="fi-input fi-input--inline" value={effConfig.period} onChange={e => setViewPeriod(e.target.value)} aria-label="Period length">
-                                <option value="day">Daily</option>
-                                <option value="week">Weekly</option>
-                                <option value="month">Monthly</option>
-                            </select>
-                            <span className="fi-muted">×</span>
-                            <input className="fi-input fi-input--inline fi-input--tiny" type="number" min="2" max="26" value={effConfig.periods} onChange={e => setViewPeriods(e.target.value)} aria-label="Number of periods" />
-                            <span className="fi-muted">ending</span>
-                            <input className="fi-input fi-input--inline" type="date" value={endDate} max={toDateInput(new Date())} onChange={e => setEndDate(e.target.value || toDateInput(new Date()))} aria-label="End date" />
-                            {endDate !== toDateInput(new Date()) && <button className="fi-crumb fi-crumb--reset" onClick={() => setEndDate(toDateInput(new Date()))}>Today</button>}
-                        </div>
-                    )}
                     {view === "dashboard" && <Button type="secondary" onClick={refresh} disabled={loading || !config || !config.rules.length}>Refresh</Button>}
                     {view === "dashboard"
                         ? <Button type="primary" onClick={() => { setSaveInfo(null); setView("settings"); }} disabled={!config || !refData}>Settings</Button>
@@ -259,13 +230,3 @@ export default function App({ api, groupFilter, focusNonce }) {
     );
 }
 
-function toDateInput(d) {
-    const pad = v => String(v).padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-function fromDateInput(str) {
-    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str || "");
-    if (!m) return null;
-    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0);
-    return Number.isNaN(d.getTime()) ? null : d;
-}

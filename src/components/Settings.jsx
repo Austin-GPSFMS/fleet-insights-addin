@@ -137,11 +137,20 @@ export function Settings({ config, rules, devices = [], groups = [], tree, onSav
                         <label className="fi-field">
                             <span>Period</span>
                             <select className="fi-input" value={draft.period} onChange={e => setDraft({ ...draft, period: e.target.value })}>
-                                <option value="day">Daily</option>
-                                <option value="week">Weekly (trailing 7 days)</option>
-                                <option value="month">Monthly (trailing 30 days)</option>
+                                <option value="day">Daily (calendar days)</option>
+                                <option value="week">Weekly (calendar weeks)</option>
+                                <option value="month">Monthly (calendar months)</option>
                             </select>
                         </label>
+                        {draft.period === "week" && (
+                            <label className="fi-field">
+                                <span>Week starts on</span>
+                                <select className="fi-input" value={String(draft.weekStart ?? 1)} onChange={e => setDraft({ ...draft, weekStart: Number(e.target.value) })}>
+                                    <option value="1">Monday</option>
+                                    <option value="0">Sunday</option>
+                                </select>
+                            </label>
+                        )}
                         <label className="fi-field">
                             <span>Periods shown</span>
                             <input className="fi-input fi-input--num" type="number" min="2" max="26" value={draft.periods} onChange={e => setDraft({ ...draft, periods: e.target.value })} />
@@ -171,7 +180,7 @@ export function Settings({ config, rules, devices = [], groups = [], tree, onSav
                         <code>rate = events ÷ distance × 1,000</code>
                         <code>rule score = 100 × max(0, 1 − rate ÷ zero-at)</code>
                         <code>score = Σ rule score × weight ÷ 100</code>
-                        <p className="fi-muted">Higher is better; 100 means no tracked events. Distance comes from MyGeotab trips in the same period, so 10 events over 10,000 {unitShort} scores far better than 10 events over 100 {unitShort}. Trend compares the current period with the one before it.</p>
+                        <p className="fi-muted">Higher is better; 100 means no tracked events. Distance comes from MyGeotab trips in the same period, so 10 events over 10,000 {unitShort} scores far better than 10 events over 100 {unitShort}. Periods are calendar-aligned, so a completed week's score never changes; the current period is shown "to date" and its score is a rate, so it is comparable to full periods. Change compares a period with the one before it.</p>
                     </div>
                     <div className="fi-formula">
                         <h5>Assets to score <span className="fi-muted">— {scorableCount.toLocaleString()} of {devices.length.toLocaleString()} devices</span></h5>

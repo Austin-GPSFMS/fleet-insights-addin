@@ -79,20 +79,16 @@ if (!/\(60\)/.test(vehTab)) throw new Error("battery trackers / untracked assets
 const groupNames = await page.$$eval(".fi-perf tbody tr td:first-child", tds => tds.map(t => t.textContent));
 if (groupNames.some(g => /Battery/.test(g))) throw new Error("Battery Trackers group should not appear");
 
-// Period selector: switch to monthly × 3 ending Sep 30 → chart has 3 bars and the range text changes.
-await page.selectOption(".fi-periodbar select", "month");
-await page.fill(".fi-periodbar input[type=number]", "3");
-await page.fill(".fi-periodbar input[type=date]", "2026-09-30");
-await page.waitForFunction(() => document.querySelectorAll(".fi-dash .fi-bar-group").length === 3, null, { timeout: 60000 });
-const subText = await page.$eval(".fi-sub", e => e.textContent);
-log("period selector:", subText.slice(0, 60));
-if (!/3 × 30 days/.test(subText) || !/9\/30\/2026/.test(subText)) throw new Error("period selector did not apply");
-await page.click("button:has-text('Today')");
-await page.selectOption(".fi-periodbar select", "week");
-await page.fill(".fi-periodbar input[type=number]", "8");
-await page.waitForFunction(() => document.querySelectorAll(".fi-dash .fi-bar-group").length === 8, null, { timeout: 60000 });
+// Calendar-aligned periods: the current bar is labelled "to date" and there is no date selector.
+const curLabel = await page.$eval(".fi-dash .fi-axis--strong", e => e.textContent);
+log("current bar label:", curLabel);
+if (!/This week \(to date\)/.test(curLabel)) throw new Error("current period should be labelled 'This week (to date)'");
+if (await page.$(".fi-periodbar")) throw new Error("date selector should be gone");
 
-// Worst group first (default sort ascending by score) → Private Assets.
+// Focus the last full week (Monday-morning "to date" data is thin), then: worst group first → Private Assets.
+await page.click("button:has-text('Show last full week')");
+await page.waitForSelector(".fi-h3sub:has-text('week of')");
+log("focused:", await page.$eval(".fi-h3sub", e => e.textContent));
 const firstGroup = await page.$eval(".fi-perf tbody tr td", td => td.textContent);
 log("worst group:", firstGroup);
 if (!/Private Assets/.test(firstGroup)) throw new Error("expected Private Assets to rank worst");
@@ -132,7 +128,7 @@ const ruleMixAfter = await page.$eval(".fi-drawer .fi-card--flat:nth-of-type(3) 
 log("drawer period switch → kpi:", kpiTitle, "| rule mix changed:", ruleMixBefore !== ruleMixAfter);
 if (!/period starting/.test(kpiTitle) || ruleMixBefore === ruleMixAfter) throw new Error("drawer KPIs / rule mix did not follow the selected period");
 await page.click("button:has-text('Back to current')");
-await page.waitForSelector(".fi-drawer .fi-kpi-title:has-text('Current score')");
+await page.waitForSelector(".fi-drawer .fi-kpi-title:has-text('to date')");
 await page.keyboard.press("Escape");
 await page.waitForSelector(".fi-drawer", { state: "detached" });
 

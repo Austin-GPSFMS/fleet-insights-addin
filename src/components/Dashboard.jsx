@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@geotab/zenith/dist/button/button";
 import {
     sumSeries, summarize, scoreSeries, ruleBreakdown, groupRollup, devicesUnder, breadcrumb, median,
-    fmtScore, fmtDelta, fmtDistance, fmtRate, rateUnitLabel, scoreUnitLabel, bandFor, ROOT_GROUP_ID
+    fmtScore, fmtDelta, fmtDistance, fmtRate, rateUnitLabel, scoreUnitLabel, bandFor, currentPeriodLabel, ROOT_GROUP_ID
 } from "../model.js";
 import { driverLabel } from "../api.js";
 import { exportScorecardExcel, exportScorecardPdf } from "../export.js";
@@ -14,7 +14,15 @@ export function Dashboard({ config, periods, refData, data, nodeId, setNodeId, s
     const [tab, setTab] = useState("groups");
     const [detail, setDetail] = useState(null); // { kind: "vehicle"|"driver", id }
     const n = periods.length;
+    // Which period the KPIs / tables / rule list describe. Default: the current (to-date) period;
+    // click a bar in the trend to focus a completed one — same gesture as the drawer.
+    const [focusIdx, setFocusIdx] = useState(n - 1);
+    useEffect(() => { setFocusIdx(n - 1); }, [n, config.period]);
+    const isCurrent = focusIdx === n - 1;
+    const focus = periods[focusIdx] || periods[n - 1];
     const labels = periods.map(p => p.label);
+    const curLabel = currentPeriodLabel(config.period);
+    const focusText = isCurrent ? `${curLabel.toLowerCase()} to date` : `${periodLabel(config)} of ${focus.label}`;
 
     const scopeDevices = useMemo(() => devicesUnder(nodeId, refData.tree, refData.devices), [nodeId, refData]);
     const scopeIds = useMemo(() => new Set(scopeDevices.map(d => d.id)), [scopeDevices]);
@@ -23,8 +31,8 @@ export function Dashboard({ config, periods, refData, data, nodeId, setNodeId, s
         () => sumSeries(scopeDevices.map(d => data.byDevice.get(d.id)).filter(Boolean), n),
         [scopeDevices, data, n]
     );
-    const fleet = useMemo(() => summarize(fleetSeries, config), [fleetSeries, config]);
-    const rules = useMemo(() => ruleBreakdown(fleetSeries, config), [fleetSeries, config]);
+    const fleet = useMemo(() => summarize(fleetSeries, config, focusIdx), [fleetSeries, config, focusIdx]);
+    const rules = useMemo(() => ruleBreakdown(fleetSeries, config, focusIdx), [fleetSeries, config, focusIdx]);
 
     const groupNameOf = useMemo(() => {
         const m = new Map();
@@ -37,15 +45,15 @@ export function Dashboard({ config, periods, refData, data, nodeId, setNodeId, s
 
     const vehicleRows = useMemo(() => scopeDevices.map(d => {
         const s = data.byDevice.get(d.id);
-        return { id: d.id, name: d.name || d.serialNumber || d.id, second: groupNameOf.get(d.id) || "", kind: "vehicle", series: s, ...summarize(s, config) };
-    }), [scopeDevices, data, config, groupNameOf]);
+        return { id: d.id, name: d.name || d.serialNumber || d.id, second: groupNameOf.get(d.id) || "", kind: "vehicle", series: s, ...summarize(s, config, focusIdx) };
+    }), [scopeDevices, data, config, groupNameOf, focusIdx]);
 
     const vehicleMedian = useMemo(() => median(vehicleRows.map(r => r.current)), [vehicleRows]);
     const prevVehicleMedian = useMemo(() => median(vehicleRows.map(r => r.previous)), [vehicleRows]);
 
     const groupRows = useMemo(
-        () => groupRollup({ nodeId, tree: refData.tree, devices: scopeDevices, byDevice: data.byDevice, config, nPeriods: n }),
-        [nodeId, refData, scopeDevices, data, config, n]
+        () => groupRollup({ nodeId, tree: refData.tree, devices: scopeDevices, byDevice: data.byDevice, config, nPeriods: n, idx: focusIdx }),
+        [nodeId, refData, scopeDevices, data, config, n, focusIdx]
     );
 
     // Drivers seen on in-scope vehicles; "current vehicle" = device of their most recent trip.
@@ -66,10 +74,10 @@ export function Dashboard({ config, periods, refData, data, nodeId, setNodeId, s
             if (!s) continue;
             const lt = lastTrip.get(id);
             const dev = lt ? refData.devicesById.get(lt.deviceId) : null;
-            rows.push({ id, name: driverLabel(refData.driversById.get(id)) || id, second: dev ? dev.name : "", kind: "driver", series: s, ...summarize(s, config) });
+            rows.push({ id, name: driverLabel(refData.driversById.get(id)) || id, second: dev ? dev.name : "", kind: "driver", series: s, ...summarize(s, config, focusIdx) });
         }
         return rows;
-    }, [data, scopeIds, refData, config]);
+    }, [data, scopeIds, refData, config, focusIdx]);
 
     const crumbs = useMemo(() => breadcrumb(nodeId, refData.tree), [nodeId, refData]);
     const scopeName = crumbs[crumbs.length - 1].name;
@@ -96,9 +104,9 @@ export function Dashboard({ config, periods, refData, data, nodeId, setNodeId, s
         else setDetail({ kind: row.kind, id: row.id });
     };
 
-    const rangeText = `${new Date(periods[n - 1].start).toLocaleDateString()} – ${new Date(periods[n - 1].end).toLocaleDateString()}`;
+    const rangeText = `${new Date(focus.start).toLocaleDateString()} – ${new Date(focus.end).toLocaleDateString()}${isCurrent ? ` (${curLabel.toLowerCase()} to date)` : ""}`;
     const exportOpts = () => ({
-        rows: activeRows, config, kind: tab, database: session ? session.database : "",
+        rows: activeRows, config, kind: tab, database: session ? session.database : "", periodIdx: focusIdx,
         scopeName, rangeText,
         subjectLabel: tab === "groups" ? "Group" : tab === "vehicles" ? "Vehicle" : "Driver",
         secondLabel: tab === "drivers" ? "Current Vehicle" : tab === "vehicles" ? "Groups" : "Vehicles"
@@ -119,31 +127,37 @@ export function Dashboard({ config, periods, refData, data, nodeId, setNodeId, s
     return (
         <div className="fi-dash">
             <section className="fi-kpis">
-                <Kpi title={`${scopeName} score`} value={fmtScore(fleet.current)} sub={scoreUnitLabel()}
+                <Kpi title={`${scopeName} score — ${focusText}`} value={fmtScore(fleet.current)} sub={`${scoreUnitLabel()} · vs the ${periodLabel(config)} before`}
                      trend={<Trend delta={fleet.delta} goodWhen="up" />} badge={<BandPill band={bandFor(fleet.current, config)} />} />
                 <Kpi title="Median vehicle score" value={fmtScore(vehicleMedian)} sub={`${vehicleRows.filter(r => r.current != null).length.toLocaleString()} of ${vehicleRows.length.toLocaleString()} vehicles scored`}
                      trend={<Trend delta={vehicleMedian != null && prevVehicleMedian != null ? vehicleMedian - prevVehicleMedian : null} goodWhen="up" />} />
-                <Kpi title="Events this period" value={fleet.currentEvents.toLocaleString()} sub={`${fmtRate(fleet.currentEvents / Math.max(1e-9, exposure(fleet.currentDistanceKm, config)) * 1000)} ${rateUnitLabel(config)}`}
-                     trend={<Trend pct={pct(fleet.currentEvents, Object.values(fleetSeries.counts[n - 2] || {}).reduce((a, b) => a + b, 0))} goodWhen="down" />} />
-                <Kpi title="Distance this period" value={fmtDistance(fleet.currentDistanceKm, config.unit)} sub={`period: ${periodLabel(config)}`}
-                     trend={<Trend pct={pct(fleet.currentDistanceKm, fleetSeries.distanceKm[n - 2])} goodWhen="up" />} />
+                <Kpi title={`Events — ${focusText}`} value={fleet.currentEvents.toLocaleString()} sub={`${fmtRate(fleet.currentEvents / Math.max(1e-9, exposure(fleet.currentDistanceKm, config)) * 1000)} ${rateUnitLabel(config)}`}
+                     trend={<Trend pct={pct(fleet.currentEvents, Object.values(fleetSeries.counts[focusIdx - 1] || {}).reduce((a, b) => a + b, 0))} goodWhen="down" />} />
+                <Kpi title={`Distance — ${focusText}`} value={fmtDistance(fleet.currentDistanceKm, config.unit)} sub={`scoring period: ${periodLabel(config)}`}
+                     trend={<Trend pct={pct(fleet.currentDistanceKm, fleetSeries.distanceKm[focusIdx - 1])} goodWhen="up" />} />
             </section>
 
             <section className="fi-card">
                 <header className="fi-card-head">
                     <div>
                         <h3>Score trend</h3>
-                        <p className="fi-muted">Safety score out of 100 per {periodLabel(config)}, last {n} periods. Higher is better.</p>
+                        <p className="fi-muted">Safety score out of 100 per {periodLabel(config)}, last {n} periods ({config.period === "week" ? `weeks start ${config.weekStart === 0 ? "Sunday" : "Monday"}` : config.period === "month" ? "calendar months" : "calendar days"}). The last bar is {curLabel.toLowerCase()} so far; completed periods don't change. Click a bar to focus the figures below on that period.</p>
+                    </div>
+                    <div className="fi-actions">
+                        {isCurrent
+                            ? (n > 1 && <Button type="tertiary" onClick={() => setFocusIdx(n - 2)}>Show last full {periodLabel(config)}</Button>)
+                            : <Button type="tertiary" onClick={() => setFocusIdx(n - 1)}>Back to {curLabel.toLowerCase()} (to date)</Button>}
                     </div>
                 </header>
-                <BarTrend values={scoreSeries(fleetSeries, config)} labels={labels} unitLabel="/ 100" height={200} max={100} bands={config.bands} colorByBand />
+                <BarTrend values={scoreSeries(fleetSeries, config)} labels={labels} unitLabel="/ 100" height={200} max={100} bands={config.bands} colorByBand currentLabel={`${curLabel} (to date)`}
+                          onSelect={setFocusIdx} selected={focusIdx} />
             </section>
 
             <div className="fi-grid-2">
                 <section className="fi-card">
                     <header className="fi-card-head">
                         <div>
-                            <h3>Performance</h3>
+                            <h3>Performance <span className="fi-muted fi-h3sub">— {focusText}</span></h3>
                             <nav className="fi-crumbs" aria-label="Group path">
                                 {crumbs.map((c, i) => (
                                     <span key={c.id}>
@@ -174,8 +188,8 @@ export function Dashboard({ config, periods, refData, data, nodeId, setNodeId, s
                 <section className="fi-card">
                     <header className="fi-card-head">
                         <div>
-                            <h3>Event performance</h3>
-                            <p className="fi-muted">Tracked rules, current period. Bar = score points lost to this rule; counts vs previous period.</p>
+                            <h3>Event performance <span className="fi-muted fi-h3sub">— {focusText}</span></h3>
+                            <p className="fi-muted">Bar = score points lost to this rule; counts vs the {periodLabel(config)} before.</p>
                         </div>
                     </header>
                     <table className="fi-table fi-table--compact">
@@ -197,7 +211,7 @@ export function Dashboard({ config, periods, refData, data, nodeId, setNodeId, s
             </div>
 
             {detail && (
-                <Detail kind={detail.kind} id={detail.id} config={config} periods={periods} data={data} refData={refData}
+                <Detail kind={detail.kind} id={detail.id} config={config} periods={periods} data={data} refData={refData} initialPeriodIdx={focusIdx}
                         session={session} onClose={() => setDetail(null)} onDismiss={onDismiss} />
             )}
         </div>
@@ -245,7 +259,7 @@ function pct(a, b) {
 function exposure(km, config) { return config.unit === "km" ? km : km / 1.60934; }
 
 export function periodLabel(config) {
-    return config.period === "day" ? "day" : config.period === "month" ? "30 days" : "week";
+    return config.period === "day" ? "day" : config.period === "month" ? "month" : "week";
 }
 
 function toneFor(band) {

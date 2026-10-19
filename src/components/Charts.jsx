@@ -6,7 +6,7 @@ import { useState } from "react";
 import { fmtScore, fmtPct, fmtDelta } from "../model.js";
 
 /** Vertical bars: one value per period. Highlights the last (current) bar. */
-export function BarTrend({ values, labels, height = 180, width = 1100, unitLabel = "", onSelect, selected, max: fixedMax, bands, colorByBand }) {
+export function BarTrend({ values, labels, height = 180, width = 1100, unitLabel = "", onSelect, selected, max: fixedMax, bands, colorByBand, currentLabel = "Current" }) {
     const [hover, setHover] = useState(null);
     const n = values.length;
     const w = width, h = height, padL = 40, padR = 8, padT = 20, padB = 26;
@@ -50,7 +50,7 @@ export function BarTrend({ values, labels, height = 180, width = 1100, unitLabel
                                 </text>
                             )}
                             <text x={padL + i * step + step / 2} y={h - 8} className={`fi-axis ${isCur ? "fi-axis--strong" : ""}`} textAnchor="middle">
-                                {isCur ? "Current" : labels[i]}
+                                {isCur ? currentLabel : labels[i]}
                             </text>
                         </g>
                     );
@@ -70,7 +70,7 @@ export function BarTrend({ values, labels, height = 180, width = 1100, unitLabel
             </svg>
             {hover != null && (
                 <div className="fi-tip">
-                    <strong>{hover === n - 1 ? "Current period" : labels[hover]}</strong>
+                    <strong>{hover === n - 1 ? `${currentLabel}` : labels[hover]}</strong>
                     <span>{values[hover] == null ? "Not scored (low exposure)" : `${fmtScore(values[hover])} ${unitLabel}`}</span>
                     {hover > 0 && values[hover] != null && values[hover - 1] != null && (
                         <span className="fi-tip-sub">vs previous: {fmtDelta(values[hover] - values[hover - 1])} pts</span>

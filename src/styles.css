@@ -160,3 +160,4 @@ g:hover > .fi-bar { fill: var(--fi-navy); }
 .fi-group-list li { padding: 4px 10px; border-bottom: 1px solid var(--fi-line); }
 .fi-group-list li:last-child { border-bottom: none; }
 .fi-group-list label { display: flex; gap: 8px; align-items: center; cursor: pointer; }
+.fi-h3sub { font-size: 13px; font-weight: 400; }

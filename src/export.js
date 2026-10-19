@@ -12,7 +12,8 @@ const NAVY = "25477B", BLUE = "0084C2", INK = "1C2B39", LIGHT = "F4F4F4";
 const BAND_FILL = { High: "F4CCCC", Medium: "FCE5CD", Low: null, "Low exposure": "EEEEEE" };
 
 /** Build the flat table shared by both exporters. */
-export function buildScorecardTable({ rows, config, kind, subjectLabel, secondLabel }) {
+export function buildScorecardTable(opts) {
+    const { rows, config, kind, subjectLabel, secondLabel } = opts;
     const rules = config.rules;
     const sorted = [...rows].sort((a, b) => {
         if (a.current == null && b.current == null) return 0;
@@ -22,7 +23,8 @@ export function buildScorecardTable({ rows, config, kind, subjectLabel, secondLa
     });
     const header = [subjectLabel, secondLabel, "Score", "Risk", `Distance (${config.unit === "km" ? "km" : "mi"})`, ...rules.map(r => r.name)];
     const body = sorted.map(r => {
-        const counts = r.series.counts[r.series.counts.length - 1] || {};
+        const i = opts.periodIdx == null ? r.series.counts.length - 1 : opts.periodIdx;
+        const counts = r.series.counts[i] || {};
         return {
             band: r.band,
             cells: [
@@ -41,7 +43,7 @@ export function buildScorecardTable({ rows, config, kind, subjectLabel, secondLa
 function titleLines({ database, scopeName, rangeText, config, kind }) {
     return [
         "GPSFMS Safety Scorecard",
-        `${database} · ${scopeName} · ${rangeText} · by ${kind}`,
+        `${database} · ${scopeName} · ${rangeText} · by ${kind} · ${config.period === "week" ? `calendar week starting ${config.weekStart === 0 ? "Sunday" : "Monday"}` : config.period === "month" ? "calendar month" : "calendar day"}`,
         `Scores are out of 100 (higher is better). Low risk ≥ ${config.bands.low}, Medium ≥ ${config.bands.medium}, below that = High risk. ` +
         `Subjects under ${config.minDistance} ${config.unit === "km" ? "km" : "mi"} in the period are not scored.`
     ];
@@ -108,7 +110,7 @@ export async function exportScorecardExcel(opts) {
     ms.addRow([`rate(rule) = events ÷ distance × 1,000`]);
     ms.addRow([`subScore(rule) = 100 × max(0, 1 − rate ÷ maxRate)`]);
     ms.addRow([`score = Σ subScore(rule) × weight(rule) ÷ 100`]);
-    ms.addRow([`Period: trailing ${config.period === "day" ? "1 day" : config.period === "month" ? "30 days" : "7 days"}; bands Low ≥ ${config.bands.low}, Medium ≥ ${config.bands.medium}; minimum exposure ${config.minDistance} ${config.unit}`]);
+    ms.addRow([`Period: calendar ${config.period}${config.period === "week" ? ` starting ${config.weekStart === 0 ? "Sunday" : "Monday"}` : ""}; bands Low ≥ ${config.bands.low}, Medium ≥ ${config.bands.medium}; minimum exposure ${config.minDistance} ${config.unit}`]);
     ms.getColumn(1).width = 44; ms.getColumn(2).width = 12; ms.getColumn(3).width = 36;
 
     const buf = await wb.xlsx.writeBuffer();
