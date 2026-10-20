@@ -164,3 +164,5 @@ g:hover > .fi-bar { fill: var(--fi-navy); }
 .fi-chip--filter { margin-left: 8px; background: #eef6fb; color: var(--fi-navy); }
 .fi-chip--filter .fi-linkbtn { color: var(--fi-navy); margin-left: 4px; }
 .fi-locpick { max-width: 260px; }
+.fi-reportby { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 12.5px; }
+.fi-linkbtn--blue { color: var(--fi-blue); font-weight: 500; }

@@ -60,8 +60,6 @@ await page.waitForSelector("text=Weights must total 100%");
 log("save refused when weights ≠ 100");
 await page.click("button:has-text(\"Rebalance to 100%\")");
 await page.click("button:has-text(\"Show sensitivity\")");
-// display group: label rows by the "Locations" sub-group
-await page.selectOption(".fi-settings select >> nth=-1", "gLoc");
 await page.screenshot({ path: join(here, "shots/01-settings.png"), fullPage: true });
 await page.click("button:has-text(\"Save settings\")");
 
@@ -74,7 +72,13 @@ const fleetScore = parseInt(kpis[0], 10);
 if (!(fleetScore >= 0 && fleetScore <= 100)) throw new Error("fleet score not on 0–100 scale");
 await page.screenshot({ path: join(here, "shots/02-dashboard.png"), fullPage: true });
 
-// Display group "Locations" is the home node: its divisions + an Unassigned row, over the whole fleet.
+// "Report by" lives on the dashboard: the suggestion button picks Locations and saves it.
+await page.waitForSelector(".fi-reportby");
+const hint = await page.$eval(".fi-reportby", e => e.textContent);
+log("report-by:", hint.trim().slice(0, 60));
+await page.click(".fi-linkbtn--blue");
+await page.waitForSelector(".fi-crumb--current:has-text('Locations')");
+await page.waitForSelector(".fi-toast:has-text('Reporting by Locations')");
 const homeRows = await page.$$eval(".fi-perf tbody tr td:first-child", tds => tds.map(t => t.textContent));
 log("home rows:", homeRows.join(" | "));
 if (!homeRows.some(r => /Southern California Division/.test(r)) || !homeRows.some(r => /^Unassigned vehicles/.test(r))) throw new Error("home node should list Locations divisions + Unassigned vehicles");

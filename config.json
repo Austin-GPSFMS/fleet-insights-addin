@@ -1,7 +1,7 @@
 {
   "name": "Fleet Insights",
   "supportEmail": "support@gpsfms.com",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "items": [
     {
       "url": "https://austin-gpsfms.github.io/fleet-insights-addin/dist/index.html",

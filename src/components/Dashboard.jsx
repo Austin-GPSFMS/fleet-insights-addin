@@ -10,7 +10,7 @@ import { BarTrend, Sparkline, HBar, Trend, BandPill } from "./Charts.jsx";
 import { SortableTable, toCsv, downloadText } from "./Table.jsx";
 import { Detail } from "./Detail.jsx";
 
-export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, setNodeId, session, onDismiss, notify }) {
+export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, setNodeId, session, onDismiss, notify, onSetDisplayGroup }) {
     const [tab, setTab] = useState("groups");
     const [unassignedOnly, setUnassignedOnly] = useState(false);
     // Home node: the display group (e.g. "Locations") when one is configured, else the company root.
@@ -113,6 +113,12 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
     }, [data, scopeIds, refData, config, focusIdx, groupNameOf, family, nodeSubtree, wholeFleetScope]);
 
     const crumbs = useMemo(() => breadcrumb(nodeId, refData.tree), [nodeId, refData]);
+    // Parent groups a report can be anchored on (have children, not system groups).
+    const parentGroups = useMemo(() => refData.groups
+        .filter(g => g.id !== ROOT_GROUP_ID && (g.children || []).length > 0 && !/^Group[A-Za-z]+Id$/.test(g.id))
+        .map(g => ({ id: g.id, name: g.name }))
+        .sort((a, b) => a.name.localeCompare(b.name)), [refData]);
+    const suggestedParent = useMemo(() => parentGroups.find(g => /location|division|region|branch|district|site|yard/i.test(g.name)) || null, [parentGroups]);
     const scopeName = crumbs[crumbs.length - 1].name;
 
     const activeRows = tab === "groups" ? groupRows : tab === "vehicles" ? vehicleRows : driverRows;
@@ -193,6 +199,16 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
                     <header className="fi-card-head">
                         <div>
                             <h3>Performance <span className="fi-muted fi-h3sub">— {focusText}</span></h3>
+                            <div className="fi-reportby">
+                                <span className="fi-muted">Report by</span>
+                                <select className="fi-input fi-input--inline" value={homeId === ROOT_GROUP_ID ? "" : homeId} onChange={e => onSetDisplayGroup && onSetDisplayGroup(e.target.value || null)} aria-label="Report by parent group">
+                                    <option value="">All groups (company tree)</option>
+                                    {parentGroups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+                                </select>
+                                {homeId === ROOT_GROUP_ID && suggestedParent && (
+                                    <button className="fi-linkbtn fi-linkbtn--blue" onClick={() => onSetDisplayGroup && onSetDisplayGroup(suggestedParent.id)}>Use “{suggestedParent.name}”</button>
+                                )}
+                            </div>
                             <nav className="fi-crumbs" aria-label="Group path">
                                 {crumbs.map((c, i) => (
                                     <span key={c.id}>

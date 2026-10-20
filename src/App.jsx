@@ -152,6 +152,18 @@ export default function App({ api, groupFilter, focusNonce }) {
         notify("All locally hidden events restored.");
     }, [api, session, hidden, notify]);
 
+    /* ---- quick change of the display group from the dashboard (saved like any setting) ---- */
+    const onSetDisplayGroup = useCallback(async id => {
+        if (!config || !session) return;
+        const clean = normalizeConfig({ ...config, displayGroupId: id || null });
+        setConfig(clean);
+        setNodeId(null);
+        const r = await saveConfig(api, session.database, clean, configMeta.recordId);
+        setConfigMeta(m => ({ ...m, recordId: r.recordId, source: r.persisted }));
+        const name = id && refData && refData.tree.byId.get(id) ? refData.tree.byId.get(id).name : null;
+        notify(name ? `Reporting by ${name} — saved for this database.` : "Reporting by all groups.");
+    }, [api, config, session, configMeta.recordId, refData, notify]);
+
     /* ---- settings save ---- */
     const onSave = async clean => {
         setSaving(true);
@@ -219,7 +231,7 @@ export default function App({ api, groupFilter, focusNonce }) {
                         : data
                             ? <>
                                 {loading && <div className="fi-progress">{progress || "Refreshing…"}</div>}
-                                <Dashboard config={effConfig} periods={periods} refData={scopedRef} data={data}
+                                <Dashboard config={effConfig} periods={periods} refData={scopedRef} data={data} onSetDisplayGroup={onSetDisplayGroup}
                                            nodeId={nodeId} setNodeId={setNodeId} session={session} onDismiss={onDismiss} notify={notify} />
                               </>
                             : null
