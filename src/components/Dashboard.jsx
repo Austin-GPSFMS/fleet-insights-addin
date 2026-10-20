@@ -125,7 +125,14 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
     const columns = useMemo(() => [
         { key: "name", label: tab === "groups" ? "Group" : tab === "vehicles" ? "Vehicle" : "Driver", sort: r => r.name, render: r => (
             <span className={r.kind === "group" || r.kind === "unassigned" ? "fi-link" : ""}>{r.name}{(r.kind === "group" || r.kind === "unassigned") && r.vehicles != null ? <span className="fi-muted"> · {r.vehicles} veh</span> : null}
-                {r.kind === "driver" && r.second ? <span className="fi-muted"> · {r.second}</span> : null}</span>
+                {r.kind === "driver" && r.second ? <span className="fi-muted"> · {r.second}</span> : null}
+                {r.kind === "group" && (
+                    <span className="fi-rowlinks" onClick={e => e.stopPropagation()}>
+                        {r.hasChildren && <button className="fi-linkbtn fi-linkbtn--blue" onClick={() => drillTo(r)}>sub-groups</button>}
+                        <button className="fi-linkbtn fi-linkbtn--blue" onClick={() => drillTo(r, "vehicles")}>vehicles</button>
+                        <button className="fi-linkbtn fi-linkbtn--blue" onClick={() => drillTo(r, "drivers")}>drivers</button>
+                    </span>
+                )}</span>
         ) },
         ...(tab !== "groups" ? [{ key: "group", label: "Group", sort: r => r.group || "", render: r => r.group || <span className="fi-muted">—</span> }] : []),
         { key: "current", label: "Score / 100", sort: r => r.current, width: "24%", render: r => (
@@ -138,8 +145,18 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
         { key: "spark", label: `Last ${n}`, sort: r => r.current, csv: r => r.scores.map(fmtScore).join(" | "), render: r => <Sparkline values={r.scores.map(v => (v == null ? 0 : v))} /> }
     ], [tab, config.unit, n]);
 
+    // Clicking a group drills into it. A group with sub-groups stays on the Groups tab (compare
+    // its children); a leaf group (a division) jumps straight to its individual scores — the
+    // Vehicles or Drivers tab, whichever was used last.
+    const [lastIndividualTab, setLastIndividualTab] = useState("vehicles");
+    useEffect(() => { if (tab === "vehicles" || tab === "drivers") setLastIndividualTab(tab); }, [tab]);
+    const drillTo = (row, individualTab) => {
+        setNodeId(row.id);
+        if (individualTab) setTab(individualTab);
+        else if (!row.hasChildren) setTab(lastIndividualTab);
+    };
     const onRow = row => {
-        if (row.kind === "group") setNodeId(row.id);
+        if (row.kind === "group") drillTo(row);
         else if (row.kind === "unassigned") { setTab("vehicles"); setUnassignedOnly(true); }
         else setDetail({ kind: row.kind, id: row.id });
     };
@@ -250,7 +267,7 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
                     </header>
                     <div className="fi-perf">
                         <SortableTable columns={columns} rows={activeRows} defaultSort="current" defaultDir="asc" onRowClick={onRow}
-                                       emptyText={tab === "groups" ? "No child groups here — switch to Vehicles." : "Nothing in scope for this period."} />
+                                       emptyText={tab === "groups" ? `${scopeName} has no sub-groups — use the Vehicles or Drivers tab for its individual scores.` : "Nothing in scope for this period."} />
                     </div>
                 </section>
 

@@ -90,6 +90,24 @@ const unassignedCount = await page.$$eval(".fi-perf tbody tr", r => r.length);
 log("unassigned vehicles listed:", unassignedCount);
 if (unassignedCount !== 15) throw new Error("expected 15 unassigned vehicles (a quarter of 60)");
 await page.click(".fi-chip--filter .fi-linkbtn");
+// Clicking a division (leaf group) jumps straight to its vehicles; the row's "drivers" link goes to drivers.
+await page.click(".fi-tab:has-text('Groups')");
+await page.click(".fi-perf tbody tr:has-text('Oregon division')");
+await page.waitForSelector(".fi-crumb--current:has-text('Oregon')");
+const landedTab = await page.$eval(".fi-tab--on", e => e.textContent);
+log("after clicking Oregon division:", landedTab);
+if (!/Vehicles \(15\)/.test(landedTab)) throw new Error("leaf group click should land on its 15 vehicles");
+await page.selectOption(".fi-locpick", "__all");
+await page.click(".fi-tab:has-text('Groups')");
+await page.hover(".fi-perf tbody tr:has-text('Oregon division')");
+await page.click(".fi-perf tbody tr:has-text('Oregon division') .fi-rowlinks button:has-text('drivers')");
+await page.waitForSelector(".fi-crumb--current:has-text('Oregon')");
+const landedTab2 = await page.$eval(".fi-tab--on", e => e.textContent);
+log("after 'drivers' link:", landedTab2);
+if (!/Drivers/.test(landedTab2)) throw new Error("drivers link should land on the Drivers tab");
+await page.selectOption(".fi-locpick", "__all");
+await page.click(".fi-tab:has-text('Groups')");
+
 // Location picker: choose Southern California → scope follows, drivers are the division's members (+ unaffiliated drivers of its trucks)
 await page.selectOption(".fi-locpick", "gLocSoCal");
 await page.waitForSelector(".fi-crumb--current:has-text('Southern California')");

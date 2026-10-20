@@ -20,7 +20,9 @@ session. No proxy, no server, no data leaves Geotab. Settings are stored in the 
   a vs-previous-period trend.
 - **Performance table** — tabs for **Groups / Vehicles / Drivers**, sortable on every column,
   with score bar, trend, events, distance, risk band and an 8-period sparkline. Click a group to
-  drill into its children (breadcrumb at the top), click a vehicle or driver for the detail drawer.
+  drill into it: a group with sub-groups shows them for comparison; a leaf group (a division) jumps
+  straight to its individual vehicle scores (hover a row for direct *vehicles* / *drivers* links).
+  Breadcrumb at the top; click a vehicle or driver for the detail drawer.
 - **Detail drawer** — per-subject score by period (click a bar to list that period's events),
   rule mix, and the underlying exception events; "Trips in MyGeotab" deep link for vehicles.
 - **Event performance** — every tracked rule with weighted points, event count vs previous
