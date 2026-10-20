@@ -16,7 +16,7 @@ export default function App({ api, groupFilter, focusNonce }) {
     const [refData, setRefData] = useState(null);
     const [raw, setRaw] = useState(null);          // { exceptions, trips }
     const [view, setView] = useState("dashboard");
-    const [nodeId, setNodeId] = useState(ROOT_GROUP_ID);
+    const [nodeId, setNodeId] = useState(null);
     const [loading, setLoading] = useState(false);
     const [progress, setProgress] = useState("");
     const [error, setError] = useState(null);
@@ -70,7 +70,7 @@ export default function App({ api, groupFilter, focusNonce }) {
                     driversById: new Map(ref.drivers.map(d => [d.id, d]))
                 });
                 const single = groupFilter && groupFilter.length === 1 ? groupFilter[0].id : ROOT_GROUP_ID;
-                setNodeId(tree.byId.has(single) ? single : ROOT_GROUP_ID);
+                setNodeId(single !== ROOT_GROUP_ID && tree.byId.has(single) ? single : null); // null → Dashboard picks the home node
             } catch (e) {
                 if (!cancelled) setError(friendlyError(e));
             } finally {

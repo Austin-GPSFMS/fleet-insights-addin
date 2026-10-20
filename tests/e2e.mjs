@@ -74,6 +74,20 @@ const fleetScore = parseInt(kpis[0], 10);
 if (!(fleetScore >= 0 && fleetScore <= 100)) throw new Error("fleet score not on 0–100 scale");
 await page.screenshot({ path: join(here, "shots/02-dashboard.png"), fullPage: true });
 
+// Display group "Locations" is the home node: its divisions + an Unassigned row, over the whole fleet.
+const homeRows = await page.$$eval(".fi-perf tbody tr td:first-child", tds => tds.map(t => t.textContent));
+log("home rows:", homeRows.join(" | "));
+if (!homeRows.some(r => /Southern California Division/.test(r)) || !homeRows.some(r => /^Unassigned vehicles/.test(r))) throw new Error("home node should list Locations divisions + Unassigned vehicles");
+const crumb = await page.$eval(".fi-crumbs", e => e.textContent);
+if (!/Locations/.test(crumb)) throw new Error("breadcrumb should end at Locations");
+await page.click(".fi-perf tbody tr:has-text('Unassigned vehicles')");
+await page.waitForSelector(".fi-chip--filter");
+const unassignedCount = await page.$$eval(".fi-perf tbody tr", r => r.length);
+log("unassigned vehicles listed:", unassignedCount);
+if (unassignedCount !== 15) throw new Error("expected 15 unassigned vehicles (a quarter of 60)");
+await page.click(".fi-chip--filter .fi-linkbtn");
+await page.click(".fi-tab:has-text('Groups')");
+
 // Excluded device types: 60 GO9 trucks only — no battery trackers / untracked assets, no "Battery Trackers" group.
 const vehTab = await page.$eval(".fi-tab:has-text('Vehicles')", e => e.textContent);
 log("vehicles tab:", vehTab);
@@ -87,10 +101,12 @@ log("current bar label:", curLabel);
 if (!/This week \(to date\)/.test(curLabel)) throw new Error("current period should be labelled 'This week (to date)'");
 if (await page.$(".fi-periodbar")) throw new Error("date selector should be gone");
 
-// Focus the last full week (Monday-morning "to date" data is thin), then: worst group first → Private Assets.
+// Focus the last full week (Monday-morning "to date" data is thin). Go up to Company → worst group first → Private Assets.
 await page.click("button:has-text('Show last full week')");
 await page.waitForSelector(".fi-h3sub:has-text('week of')");
 log("focused:", await page.$eval(".fi-h3sub", e => e.textContent));
+await page.click(".fi-crumbs button:has-text('Company')");
+await page.waitForSelector(".fi-perf tbody tr:has-text('Private Assets')");
 const firstGroup = await page.$eval(".fi-perf tbody tr td", td => td.textContent);
 log("worst group:", firstGroup);
 if (!/Private Assets/.test(firstGroup)) throw new Error("expected Private Assets to rank worst");
@@ -142,7 +158,7 @@ await page.waitForSelector(".fi-drawer", { state: "detached" });
 
 // 5) Drivers tab (root scope) + exports: Excel download, PDF popup, CSV download.
 await page.click(".fi-crumb--reset");
-await page.waitForSelector(".fi-crumb--current:has-text('Company')");
+await page.waitForSelector(".fi-crumb--current:has-text('Locations')");
 await page.click(".fi-tab:has-text('Drivers')");
 const drvRows = await page.$$eval(".fi-perf tbody tr", r => r.length);
 log("driver rows:", drvRows);

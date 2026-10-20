@@ -10,8 +10,15 @@ import { BarTrend, Sparkline, HBar, Trend, BandPill } from "./Charts.jsx";
 import { SortableTable, toCsv, downloadText } from "./Table.jsx";
 import { Detail } from "./Detail.jsx";
 
-export function Dashboard({ config, periods, refData, data, nodeId, setNodeId, session, onDismiss, notify }) {
+export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, setNodeId, session, onDismiss, notify }) {
     const [tab, setTab] = useState("groups");
+    const [unassignedOnly, setUnassignedOnly] = useState(false);
+    // Home node: the display group (e.g. "Locations") when one is configured, else the company root.
+    const homeId = config.displayGroupId && refData.tree.byId.has(config.displayGroupId) ? config.displayGroupId : ROOT_GROUP_ID;
+    const nodeId = nodeIdProp || homeId;
+    const wholeFleet = useMemo(() => [ROOT_GROUP_ID, homeId], [homeId]);
+    useEffect(() => { setUnassignedOnly(false); }, [nodeId]);
+    const pickTab = k => { setTab(k); setUnassignedOnly(false); };
     const [detail, setDetail] = useState(null); // { kind: "vehicle"|"driver", id }
     const n = periods.length;
     // Which period the KPIs / tables / rule list describe. Default: the current (to-date) period;
@@ -24,7 +31,7 @@ export function Dashboard({ config, periods, refData, data, nodeId, setNodeId, s
     const curLabel = currentPeriodLabel(config.period);
     const focusText = isCurrent ? `${curLabel.toLowerCase()} to date` : `${periodLabel(config)} of ${focus.label}`;
 
-    const scopeDevices = useMemo(() => devicesUnder(nodeId, refData.tree, refData.devices), [nodeId, refData]);
+    const scopeDevices = useMemo(() => devicesUnder(nodeId, refData.tree, refData.devices, wholeFleet), [nodeId, refData, wholeFleet]);
     const scopeIds = useMemo(() => new Set(scopeDevices.map(d => d.id)), [scopeDevices]);
 
     const fleetSeries = useMemo(
@@ -40,18 +47,23 @@ export function Dashboard({ config, periods, refData, data, nodeId, setNodeId, s
         return m;
     }, [refData, config]);
 
-    const vehicleRows = useMemo(() => scopeDevices.map(d => {
-        const s = data.byDevice.get(d.id);
-        return { id: d.id, name: d.name || d.serialNumber || d.id, group: groupNameOf.get(d.id) || "", second: "", kind: "vehicle", series: s, ...summarize(s, config, focusIdx) };
-    }), [scopeDevices, data, config, groupNameOf, focusIdx]);
-
-    const vehicleMedian = useMemo(() => median(vehicleRows.map(r => r.current)), [vehicleRows]);
-    const prevVehicleMedian = useMemo(() => median(vehicleRows.map(r => r.previous)), [vehicleRows]);
-
     const groupRows = useMemo(
         () => groupRollup({ nodeId, tree: refData.tree, devices: scopeDevices, byDevice: data.byDevice, config, nPeriods: n, idx: focusIdx }),
         [nodeId, refData, scopeDevices, data, config, n, focusIdx]
     );
+
+    const unassignedIds = useMemo(() => {
+        const row = groupRows.find(r => r.kind === "unassigned");
+        return row ? new Set(row.deviceIds) : new Set();
+    }, [groupRows]);
+    const vehicleRows = useMemo(() => (unassignedOnly ? scopeDevices.filter(d => unassignedIds.has(d.id)) : scopeDevices).map(d => {
+        const s = data.byDevice.get(d.id);
+        return { id: d.id, name: d.name || d.serialNumber || d.id, group: groupNameOf.get(d.id) || "", second: "", kind: "vehicle", series: s, ...summarize(s, config, focusIdx) };
+    }), [scopeDevices, data, config, groupNameOf, focusIdx, unassignedOnly, unassignedIds]);
+
+    const vehicleMedian = useMemo(() => median(vehicleRows.map(r => r.current)), [vehicleRows]);
+    const prevVehicleMedian = useMemo(() => median(vehicleRows.map(r => r.previous)), [vehicleRows]);
+
 
     // Drivers seen on in-scope vehicles; "current vehicle" = device of their most recent trip.
     const driverRows = useMemo(() => {
@@ -86,7 +98,7 @@ export function Dashboard({ config, periods, refData, data, nodeId, setNodeId, s
     const activeRows = tab === "groups" ? groupRows : tab === "vehicles" ? vehicleRows : driverRows;
     const columns = useMemo(() => [
         { key: "name", label: tab === "groups" ? "Group" : tab === "vehicles" ? "Vehicle" : "Driver", sort: r => r.name, render: r => (
-            <span className={r.kind === "group" ? "fi-link" : ""}>{r.name}{r.kind === "group" && r.vehicles != null ? <span className="fi-muted"> · {r.vehicles} veh</span> : null}
+            <span className={r.kind === "group" || r.kind === "unassigned" ? "fi-link" : ""}>{r.name}{(r.kind === "group" || r.kind === "unassigned") && r.vehicles != null ? <span className="fi-muted"> · {r.vehicles} veh</span> : null}
                 {r.kind === "driver" && r.second ? <span className="fi-muted"> · {r.second}</span> : null}</span>
         ) },
         ...(tab !== "groups" ? [{ key: "group", label: "Group", sort: r => r.group || "", render: r => r.group || <span className="fi-muted">—</span> }] : []),
@@ -102,7 +114,7 @@ export function Dashboard({ config, periods, refData, data, nodeId, setNodeId, s
 
     const onRow = row => {
         if (row.kind === "group") setNodeId(row.id);
-        else if (row.kind === "direct") setTab("vehicles");
+        else if (row.kind === "unassigned") { setTab("vehicles"); setUnassignedOnly(true); }
         else setDetail({ kind: row.kind, id: row.id });
     };
 
@@ -170,13 +182,14 @@ export function Dashboard({ config, periods, refData, data, nodeId, setNodeId, s
                                             : <span className="fi-crumb fi-crumb--current">{c.name}</span>}
                                     </span>
                                 ))}
-                                {nodeId !== ROOT_GROUP_ID && <button className="fi-crumb fi-crumb--reset" onClick={() => setNodeId(ROOT_GROUP_ID)}>Reset</button>}
+                                {nodeId !== homeId && <button className="fi-crumb fi-crumb--reset" onClick={() => setNodeId(homeId)}>Reset</button>}
+                                {unassignedOnly && <span className="fi-chip fi-chip--filter">Unassigned vehicles only <button className="fi-linkbtn" onClick={() => setUnassignedOnly(false)}>×</button></span>}
                             </nav>
                         </div>
                         <div className="fi-actions">
                             <div className="fi-tabs" role="tablist">
                                 {[["groups", `Groups (${groupRows.length})`], ["vehicles", `Vehicles (${vehicleRows.length})`], ["drivers", `Drivers (${driverRows.length})`]].map(([k, l]) => (
-                                    <button key={k} role="tab" aria-selected={tab === k} className={`fi-tab ${tab === k ? "fi-tab--on" : ""}`} onClick={() => setTab(k)}>{l}</button>
+                                    <button key={k} role="tab" aria-selected={tab === k} className={`fi-tab ${tab === k ? "fi-tab--on" : ""}`} onClick={() => pickTab(k)}>{l}</button>
                                 ))}
                             </div>
                             <ExportMenu onPick={doExport} />

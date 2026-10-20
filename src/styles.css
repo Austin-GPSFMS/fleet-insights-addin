@@ -161,3 +161,5 @@ g:hover > .fi-bar { fill: var(--fi-navy); }
 .fi-group-list li:last-child { border-bottom: none; }
 .fi-group-list label { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 .fi-h3sub { font-size: 13px; font-weight: 400; }
+.fi-chip--filter { margin-left: 8px; background: #eef6fb; color: var(--fi-navy); }
+.fi-chip--filter .fi-linkbtn { color: var(--fi-navy); margin-left: 4px; }

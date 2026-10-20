@@ -175,7 +175,8 @@ test("group tree rollup and drill", () => {
     ];
     const tree = buildGroupTree(groups);
     const rows = groupRollup({ nodeId: "GroupCompanyId", tree, devices, byDevice, config, nPeriods: periods.length });
-    assert.deepEqual(rows.map(r => r.name), ["North", "South", "Company (direct)"]);
+    assert.deepEqual(rows.map(r => r.name), ["North", "South", "Unassigned vehicles"]);
+    assert.deepEqual(rows[2].deviceIds, ["d4"]);
     assert.ok(Math.abs(rows[0].current - 86.4) < 1e-9);
     assert.equal(rows[0].vehicles, 1);
     assert.equal(rows[0].hasChildren, true);
@@ -240,6 +241,27 @@ test("displayGroupLabel: sub-group of the display parent, else other non-system 
     const none = normalizeConfig({ version: 2 });
     assert.equal(displayGroupLabel([{ id: "gSoCalYard" }, { id: "gOps" }], none, tree), "SoCal Yard, Operations");
     assert.ok(isSystemGroupId("GroupVehicleId") && isSystemGroupId("GroupCompanyId") && !isSystemGroupId("b2A3"));
+});
+
+test("display group as the home node: children + unassigned vehicles across the whole fleet", () => {
+    const groups = [
+        { id: "GroupCompanyId", name: "Company", children: [{ id: "gLoc" }, { id: "gOps" }] },
+        { id: "gLoc", name: "Locations", children: [{ id: "gSoCal" }, { id: "gNorCal" }] },
+        { id: "gSoCal", name: "Southern California Division", children: [] },
+        { id: "gNorCal", name: "Northern California division", children: [] },
+        { id: "gOps", name: "Operations", children: [] }
+    ];
+    const tree = buildGroupTree(groups);
+    const devices = [
+        { id: "d1", groups: [{ id: "gSoCal" }, { id: "gOps" }] },
+        { id: "d2", groups: [{ id: "gNorCal" }] },
+        { id: "d4", groups: [{ id: "gOps" }] } // no location
+    ];
+    const scope = devicesUnder("gLoc", tree, devices, ["GroupCompanyId", "gLoc"]);
+    assert.equal(scope.length, 3); // whole fleet, not just Locations members
+    const rows = groupRollup({ nodeId: "gLoc", tree, devices: scope, byDevice, config, nPeriods: periods.length });
+    assert.deepEqual(rows.map(r => [r.name, r.vehicles]), [["Southern California Division", 1], ["Northern California division", 1], ["Unassigned vehicles", 1]]);
+    assert.deepEqual(rows[2].deviceIds, ["d4"]);
 });
 
 console.log(`\n${passed} tests passed`);

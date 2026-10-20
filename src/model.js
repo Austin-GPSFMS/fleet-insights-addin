@@ -524,17 +524,24 @@ export function groupRollup({ nodeId, tree, devices, byDevice, config, nPeriods,
             series, ...summarize(series, config, idx)
         });
     }
-    const direct = devices.filter(d => !assigned.has(d.id) && (d.groups || []).some(g => g.id === nodeId));
-    if (direct.length && childIds.length) {
-        const series = sumSeries(direct.map(m => byDevice.get(m.id)).filter(Boolean), nPeriods);
-        rows.push({ id: `${nodeId}::direct`, name: `${(node && node.name) || "Group"} (direct)`, kind: "direct", vehicles: direct.length, hasChildren: false, series, ...summarize(series, config, idx) });
+    // Everything in scope that is not under any child: for the company root these are devices
+    // directly in the company group; for a display group such as "Locations" they are the
+    // vehicles not assigned to any location.
+    const unassigned = devices.filter(d => !assigned.has(d.id));
+    if (unassigned.length && childIds.length) {
+        const series = sumSeries(unassigned.map(m => byDevice.get(m.id)).filter(Boolean), nPeriods);
+        rows.push({
+            id: `${nodeId}::unassigned`, name: "Unassigned vehicles", kind: "unassigned", vehicles: unassigned.length, hasChildren: false,
+            deviceIds: unassigned.map(d => d.id), series, ...summarize(series, config, idx)
+        });
     }
+    void node;
     return rows.filter(r => r.vehicles > 0);
 }
 
-/** Devices in the subtree of nodeId. */
-export function devicesUnder(nodeId, tree, devices) {
-    if (nodeId === ROOT_GROUP_ID) return devices;
+/** Devices in the subtree of nodeId. `wholeFleetIds` are nodes that scope to every device (root, display group). */
+export function devicesUnder(nodeId, tree, devices, wholeFleetIds = []) {
+    if (nodeId === ROOT_GROUP_ID || wholeFleetIds.includes(nodeId)) return devices;
     const subtree = tree.descendants(nodeId);
     return devices.filter(d => (d.groups || []).some(g => subtree.has(g.id)));
 }
