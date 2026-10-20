@@ -1,7 +1,7 @@
 {
   "name": "Fleet Insights (dev)",
   "supportEmail": "support@gpsfms.com",
-  "version": "0.5.2-dev",
+  "version": "0.6.0-dev",
   "items": [
     {
       "url": "http://localhost:8080/dist/index.html",

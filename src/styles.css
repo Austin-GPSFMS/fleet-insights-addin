@@ -166,6 +166,6 @@ g:hover > .fi-bar { fill: var(--fi-navy); }
 .fi-locpick { max-width: 260px; }
 .fi-reportby { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 12.5px; }
 .fi-linkbtn--blue { color: var(--fi-blue); font-weight: 500; }
-.fi-rowlinks { display: inline-flex; gap: 10px; margin-left: 12px; font-size: 12px; opacity: 0; transition: opacity .12s; }
-.fi-row--click:hover .fi-rowlinks { opacity: 1; }
-.fi-rowlinks .fi-linkbtn { font-size: 12px; }
+.fi-rowlinks { display: inline-flex; gap: 6px; }
+.fi-minibtn { font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid #c9d0da; background: #fff; color: var(--fi-navy); cursor: pointer; white-space: nowrap; }
+.fi-minibtn:hover { border-color: var(--fi-blue); color: var(--fi-blue); background: #eef6fb; }

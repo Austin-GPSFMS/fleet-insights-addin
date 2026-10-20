@@ -21,7 +21,8 @@ session. No proxy, no server, no data leaves Geotab. Settings are stored in the 
 - **Performance table** — tabs for **Groups / Vehicles / Drivers**, sortable on every column,
   with score bar, trend, events, distance, risk band and an 8-period sparkline. Click a group to
   drill into it: a group with sub-groups shows them for comparison; a leaf group (a division) jumps
-  straight to its individual vehicle scores (hover a row for direct *vehicles* / *drivers* links).
+  straight to its individual vehicle scores; every group row also has **Sub-groups / Vehicles /
+  Drivers** buttons in an Open column.
   Breadcrumb at the top; click a vehicle or driver for the detail drawer.
 - **Detail drawer** — per-subject score by period (click a bar to list that period's events),
   rule mix, and the underlying exception events; "Trips in MyGeotab" deep link for vehicles.
@@ -37,7 +38,10 @@ session. No proxy, no server, no data leaves Geotab. Settings are stored in the 
   total 100%)** with "Rebalance to 100%", optional per-rule sensitivity ("zero at N events per
   1,000 mi/km"), period length and count, exposure unit, minimum distance to be scored, risk-band
   thresholds. The formula is shown in plain text on the settings page.
-- **Export** — **Excel scorecard** (styled like the customer's GEOTAB-SCORECARD sheet: title,
+- **Export** — from the Groups tab the workbook/PDF is the full package: a **Summary** sheet with
+  the group comparison, then **one sheet per group** (each location, plus Unassigned vehicles) with
+  that group's vehicle scorecard followed by its driver scorecard, then the Scoring model.
+  From the Vehicles or Drivers tab it is that single table. **Excel scorecard** (styled like the customer's GEOTAB-SCORECARD sheet: title,
   worst-first rows banded red/orange by risk, one column per rule, frozen header, autofilter,
   plus a "Scoring model" sheet), **PDF scorecard** (branded landscape print view → Save as PDF),
   and CSV of the on-screen table.

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@geotab/zenith/dist/button/button";
 import {
     sumSeries, summarize, scoreSeries, ruleBreakdown, groupRollup, devicesUnder, breadcrumb, median,
@@ -56,10 +56,12 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
         const row = groupRows.find(r => r.kind === "unassigned");
         return row ? new Set(row.deviceIds) : new Set();
     }, [groupRows]);
-    const vehicleRows = useMemo(() => (unassignedOnly ? scopeDevices.filter(d => unassignedIds.has(d.id)) : scopeDevices).map(d => {
+    const buildVehicleRows = useCallback(devs => devs.map(d => {
         const s = data.byDevice.get(d.id);
         return { id: d.id, name: d.name || d.serialNumber || d.id, group: groupNameOf.get(d.id) || "", second: "", kind: "vehicle", series: s, ...summarize(s, config, focusIdx) };
-    }), [scopeDevices, data, config, groupNameOf, focusIdx, unassignedOnly, unassignedIds]);
+    }), [data, config, groupNameOf, focusIdx]);
+    const vehicleRows = useMemo(() => buildVehicleRows(unassignedOnly ? scopeDevices.filter(d => unassignedIds.has(d.id)) : scopeDevices),
+        [buildVehicleRows, scopeDevices, unassignedOnly, unassignedIds]);
 
     const vehicleMedian = useMemo(() => median(vehicleRows.map(r => r.current)), [vehicleRows]);
     const prevVehicleMedian = useMemo(() => median(vehicleRows.map(r => r.previous)), [vehicleRows]);
@@ -72,27 +74,31 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
     const family = useMemo(() => (homeId !== ROOT_GROUP_ID ? refData.tree.descendants(homeId) : null), [homeId, refData]);
     const nodeSubtree = useMemo(() => refData.tree.descendants(nodeId), [nodeId, refData]);
     const wholeFleetScope = wholeFleet.includes(nodeId);
-    const driverRows = useMemo(() => {
+    /**
+     * Drivers for a scope. `ids` = device ids in scope, `subtree` = group ids of the node (null for
+     * whole fleet). Members of a location belong to that location whatever truck they drove;
+     * drivers with no location membership follow the vehicles they drove.
+     */
+    const buildDriverRows = useCallback((ids, subtree, isWholeFleet) => {
         const seen = new Set();
         const lastTrip = new Map();
         const driverInFamily = user => !!(family && user && (user.groups || []).some(g => family.has(g.id)));
-        const driverInNode = user => !!(user && (user.groups || []).some(g => nodeSubtree.has(g.id)));
-        // last trip per driver — within the scope when a location is selected, otherwise fleet-wide
+        const driverInNode = user => !!(user && subtree && (user.groups || []).some(g => subtree.has(g.id)));
         for (const t of data.trips) {
             if (!t.driver) continue;
-            if (!wholeFleetScope && !scopeIds.has(t.device && t.device.id)) continue;
+            if (!isWholeFleet && !ids.has(t.device && t.device.id)) continue;
             const ts = Date.parse(t.start);
             const prev = lastTrip.get(t.driver.id);
             if (!prev || ts > prev.ts) lastTrip.set(t.driver.id, { ts, deviceId: t.device && t.device.id });
         }
         const drove = new Set();
-        for (const e of data.exceptions) if (e.driver && scopeIds.has(e.device && e.device.id)) drove.add(e.driver.id);
-        for (const t of data.trips) if (t.driver && scopeIds.has(t.device && t.device.id)) drove.add(t.driver.id);
+        for (const e of data.exceptions) if (e.driver && ids.has(e.device && e.device.id)) drove.add(e.driver.id);
+        for (const t of data.trips) if (t.driver && ids.has(t.device && t.device.id)) drove.add(t.driver.id);
         for (const id of data.byDriver.keys()) {
             const user = refData.driversById.get(id);
-            if (wholeFleetScope) { if (drove.has(id) || driverInFamily(user)) seen.add(id); continue; }
-            if (driverInFamily(user)) { if (driverInNode(user)) seen.add(id); }   // member of a location → only that location
-            else if (drove.has(id)) seen.add(id);                                 // no location → by vehicles driven
+            if (isWholeFleet) { if (drove.has(id) || driverInFamily(user)) seen.add(id); continue; }
+            if (driverInFamily(user)) { if (driverInNode(user)) seen.add(id); }
+            else if (drove.has(id)) seen.add(id);
         }
         const rows = [];
         for (const id of seen) {
@@ -100,8 +106,6 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
             if (!s) continue;
             const lt = lastTrip.get(id);
             const dev = lt ? refData.devicesById.get(lt.deviceId) : null;
-            // Location members are labelled by their own membership; everyone else takes the
-            // current vehicle's location, then their own other groups as a last resort.
             const user = refData.driversById.get(id);
             let group = "";
             if (driverInFamily(user)) group = displayGroupLabel(user.groups, config, refData.tree);
@@ -110,7 +114,8 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
             rows.push({ id, name: driverLabel(user) || id, group, second: dev ? dev.name : "", kind: "driver", series: s, ...summarize(s, config, focusIdx) });
         }
         return rows;
-    }, [data, scopeIds, refData, config, focusIdx, groupNameOf, family, nodeSubtree, wholeFleetScope]);
+    }, [data, refData, config, focusIdx, groupNameOf, family]);
+    const driverRows = useMemo(() => buildDriverRows(scopeIds, nodeSubtree, wholeFleetScope), [buildDriverRows, scopeIds, nodeSubtree, wholeFleetScope]);
 
     const crumbs = useMemo(() => breadcrumb(nodeId, refData.tree), [nodeId, refData]);
     // Parent groups a report can be anchored on (have children, not system groups).
@@ -125,15 +130,16 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
     const columns = useMemo(() => [
         { key: "name", label: tab === "groups" ? "Group" : tab === "vehicles" ? "Vehicle" : "Driver", sort: r => r.name, render: r => (
             <span className={r.kind === "group" || r.kind === "unassigned" ? "fi-link" : ""}>{r.name}{(r.kind === "group" || r.kind === "unassigned") && r.vehicles != null ? <span className="fi-muted"> · {r.vehicles} veh</span> : null}
-                {r.kind === "driver" && r.second ? <span className="fi-muted"> · {r.second}</span> : null}
-                {r.kind === "group" && (
-                    <span className="fi-rowlinks" onClick={e => e.stopPropagation()}>
-                        {r.hasChildren && <button className="fi-linkbtn fi-linkbtn--blue" onClick={() => drillTo(r)}>sub-groups</button>}
-                        <button className="fi-linkbtn fi-linkbtn--blue" onClick={() => drillTo(r, "vehicles")}>vehicles</button>
-                        <button className="fi-linkbtn fi-linkbtn--blue" onClick={() => drillTo(r, "drivers")}>drivers</button>
-                    </span>
-                )}</span>
+                {r.kind === "driver" && r.second ? <span className="fi-muted"> · {r.second}</span> : null}</span>
         ) },
+        ...(tab === "groups" ? [{ key: "open", label: "Open", sort: r => r.vehicles, render: r => (
+            <span className="fi-rowlinks" onClick={e => e.stopPropagation()}>
+                {r.kind === "group" && r.hasChildren && <button className="fi-minibtn" onClick={() => drillTo(r)}>Sub-groups</button>}
+                {r.kind === "group" && <button className="fi-minibtn" onClick={() => drillTo(r, "vehicles")}>Vehicles</button>}
+                {r.kind === "group" && <button className="fi-minibtn" onClick={() => drillTo(r, "drivers")}>Drivers</button>}
+                {r.kind === "unassigned" && <button className="fi-minibtn" onClick={() => { setTab("vehicles"); setUnassignedOnly(true); }}>Vehicles</button>}
+            </span>
+        ) }] : []),
         ...(tab !== "groups" ? [{ key: "group", label: "Group", sort: r => r.group || "", render: r => r.group || <span className="fi-muted">—</span> }] : []),
         { key: "current", label: "Score / 100", sort: r => r.current, width: "24%", render: r => (
             <HBar value={r.current} max={100} label={fmtScore(r.current)} tone={toneFor(r.band)} />
@@ -162,8 +168,24 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
     };
 
     const rangeText = `${new Date(focus.start).toLocaleDateString()} – ${new Date(focus.end).toLocaleDateString()}${isCurrent ? ` (${curLabel.toLowerCase()} to date)` : ""}`;
+    // When exporting the group comparison, add one sheet / page per group with its vehicles and drivers.
+    const exportSections = () => {
+        if (tab !== "groups") return [];
+        return groupRows.map(g => {
+            const devs = g.kind === "unassigned"
+                ? scopeDevices.filter(d => unassignedIds.has(d.id))
+                : devicesUnder(g.id, refData.tree, scopeDevices);
+            const ids = new Set(devs.map(d => d.id));
+            const subtree = g.kind === "unassigned" ? null : refData.tree.descendants(g.id);
+            return {
+                title: g.name,
+                vehicles: { rows: buildVehicleRows(devs), subjectLabel: "Vehicle", groupLabel: "Group", secondLabel: null },
+                drivers: { rows: buildDriverRows(ids, subtree, false), subjectLabel: "Driver", groupLabel: "Group", secondLabel: "Current Vehicle" }
+            };
+        });
+    };
     const exportOpts = () => ({
-        rows: activeRows, config, kind: tab, database: session ? session.database : "", periodIdx: focusIdx,
+        rows: activeRows, config, kind: tab, database: session ? session.database : "", periodIdx: focusIdx, sections: exportSections(),
         scopeName, rangeText,
         subjectLabel: tab === "groups" ? "Group" : tab === "vehicles" ? "Vehicle" : "Driver",
         groupLabel: tab === "groups" ? null : "Group",

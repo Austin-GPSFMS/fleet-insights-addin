@@ -99,8 +99,7 @@ log("after clicking Oregon division:", landedTab);
 if (!/Vehicles \(15\)/.test(landedTab)) throw new Error("leaf group click should land on its 15 vehicles");
 await page.selectOption(".fi-locpick", "__all");
 await page.click(".fi-tab:has-text('Groups')");
-await page.hover(".fi-perf tbody tr:has-text('Oregon division')");
-await page.click(".fi-perf tbody tr:has-text('Oregon division') .fi-rowlinks button:has-text('drivers')");
+await page.click(".fi-perf tbody tr:has-text('Oregon division') .fi-minibtn:has-text('Drivers')");
 await page.waitForSelector(".fi-crumb--current:has-text('Oregon')");
 const landedTab2 = await page.$eval(".fi-tab--on", e => e.textContent);
 log("after 'drivers' link:", landedTab2);
@@ -191,6 +190,13 @@ await page.waitForSelector(".fi-drawer", { state: "detached" });
 // 5) Drivers tab (root scope) + exports: Excel download, PDF popup, CSV download.
 await page.click(".fi-crumb--reset");
 await page.waitForSelector(".fi-crumb--current:has-text('Locations')");
+// Group export: Summary + one sheet per location (vehicles then drivers) + Scoring model
+await page.click(".fi-tab:has-text('Groups')");
+await page.click("text=Export ▾");
+const [gx] = await Promise.all([page.waitForEvent("download"), page.click("text=Excel scorecard")]);
+const gxPath = join(here, "shots", "groups-" + gx.suggestedFilename());
+await gx.saveAs(gxPath);
+log("group excel:", gx.suggestedFilename());
 await page.click(".fi-tab:has-text('Drivers')");
 const drvRows = await page.$$eval(".fi-perf tbody tr", r => r.length);
 log("driver rows:", drvRows);
