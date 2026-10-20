@@ -39,6 +39,11 @@ session. No proxy, no server, no data leaves Geotab. Settings are stored in the 
   worst-first rows banded red/orange by risk, one column per rule, frozen header, autofilter,
   plus a "Scoring model" sheet), **PDF scorecard** (branded landscape print view → Save as PDF),
   and CSV of the on-screen table.
+- **Group label** — Settings → "Group shown next to each driver / vehicle": pick a parent group
+  such as *Locations* and every driver and vehicle row (on screen and in the Excel/PDF exports)
+  shows which of its sub-groups they belong to (e.g. *Southern California Division*). Drivers use
+  their own user group membership first, then their current vehicle's groups. Anyone outside that
+  family shows their other (non-system) groups instead.
 - **Assets to score** (Settings) — device types present in the database with counts; untracked
   assets (`None`), GO Anywhere battery trackers (`GoAnywhere`, `GoAnywhereLite`, `Gemini`),
   third-party and GoDrive-only devices are excluded by default. Whole groups (with sub-groups) can be

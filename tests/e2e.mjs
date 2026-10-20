@@ -60,6 +60,8 @@ await page.waitForSelector("text=Weights must total 100%");
 log("save refused when weights ≠ 100");
 await page.click("button:has-text(\"Rebalance to 100%\")");
 await page.click("button:has-text(\"Show sensitivity\")");
+// display group: label rows by the "Locations" sub-group
+await page.selectOption(".fi-settings select >> nth=-1", "gLoc");
 await page.screenshot({ path: join(here, "shots/01-settings.png"), fullPage: true });
 await page.click("button:has-text(\"Save settings\")");
 
@@ -100,8 +102,14 @@ const kids = await page.$$eval(".fi-perf tbody tr", r => r.map(x => x.querySelec
 log("north children:", kids.join(" ; "));
 if (!kids.some(k => /Yard/.test(k)) || !kids.some(k => /Crews/.test(k))) throw new Error("drill-down children missing");
 
-// 4) Vehicles tab → open worst vehicle → dismiss one event via the API path.
+// 4) Vehicles tab: Group column shows the Locations sub-group (or other groups as fallback) → open worst vehicle → dismiss.
 await page.click(".fi-tab:has-text('Vehicles')");
+const groupCells = await page.$$eval(".fi-perf tbody tr td:nth-child(2)", tds => tds.map(t => t.textContent));
+log("vehicle group labels:", [...new Set(groupCells)].join(" | "));
+if (!groupCells.some(g => /division/i.test(g))) throw new Error("Group column should show Locations sub-groups");
+if (groupCells.some(g => /division/i.test(g) && /,/.test(g))) throw new Error("a vehicle with a location should show only its division");
+if (!groupCells.some(g => /North - (Yard|Crews)$/.test(g))) throw new Error("vehicles without a location should fall back to their other groups");
+if (groupCells.some(g => /Vehicle$/.test(g) && !/division/i.test(g))) throw new Error("system group 'Vehicle' should never be shown");
 await page.click(".fi-perf tbody tr >> nth=0");
 await page.waitForSelector(".fi-drawer");
 const before = await page.$$eval(".fi-drawer .fi-table-wrap--scroll tbody tr", r => r.length);
@@ -151,6 +159,11 @@ const [popup] = await Promise.all([page.waitForEvent("popup"), page.click("text=
 await popup.waitForLoadState("domcontentloaded");
 const pdfTitle = await popup.title();
 const pdfRows = await popup.$$eval("tbody tr", r => r.length);
+const pdfHeader = await popup.$$eval("thead th", th => th.map(t => t.textContent));
+const pdfColor = await popup.evaluate(() => getComputedStyle(document.querySelector("tr.High td, tr.Medium td") || document.body).printColorAdjust || getComputedStyle(document.body).webkitPrintColorAdjust);
+log("pdf header:", pdfHeader.slice(0, 4).join(" | "), "| print-color-adjust:", pdfColor);
+if (pdfHeader[1] !== "Group" || pdfHeader[2] !== "Current Vehicle") throw new Error("PDF should carry Group and Current Vehicle columns for drivers");
+if (pdfColor !== "exact") throw new Error("print view must force background colours");
 log("pdf print view:", pdfTitle, "| rows:", pdfRows);
 if (!/Scorecard/.test(pdfTitle) || pdfRows < 20) throw new Error("print view missing rows");
 await popup.emulateMedia({ media: "print" });

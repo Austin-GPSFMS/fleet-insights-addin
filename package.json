@@ -1,6 +1,6 @@
 {
   "name": "fleet-insights-addin",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "type": "module",
   "description": "GPSFMS Fleet Insights — MyGeotab add-in: weighted safety score from any set of exception rules, trended over time, by group / vehicle / driver. Client-side only (no server). Built with Geotab Zenith.",

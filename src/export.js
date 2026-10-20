@@ -13,7 +13,7 @@ const BAND_FILL = { High: "F4CCCC", Medium: "FCE5CD", Low: null, "Low exposure":
 
 /** Build the flat table shared by both exporters. */
 export function buildScorecardTable(opts) {
-    const { rows, config, kind, subjectLabel, secondLabel } = opts;
+    const { rows, config, kind, subjectLabel, groupLabel, secondLabel } = opts;
     const rules = config.rules;
     const sorted = [...rows].sort((a, b) => {
         if (a.current == null && b.current == null) return 0;
@@ -21,7 +21,11 @@ export function buildScorecardTable(opts) {
         if (b.current == null) return -1;
         return a.current - b.current; // worst first
     });
-    const header = [subjectLabel, secondLabel, "Score", "Risk", `Distance (${config.unit === "km" ? "km" : "mi"})`, ...rules.map(r => r.name)];
+    const extra = [];           // optional identity columns between the subject and the score
+    if (groupLabel) extra.push({ label: groupLabel, get: r => r.group || "" });
+    if (secondLabel) extra.push({ label: secondLabel, get: r => r.second || "" });
+    const header = [subjectLabel, ...extra.map(e => e.label), "Score", "Risk", `Distance (${config.unit === "km" ? "km" : "mi"})`, ...rules.map(r => r.name)];
+    const textCols = 1 + extra.length;  // columns that are left-aligned text
     const body = sorted.map(r => {
         const i = opts.periodIdx == null ? r.series.counts.length - 1 : opts.periodIdx;
         const counts = r.series.counts[i] || {};
@@ -29,7 +33,7 @@ export function buildScorecardTable(opts) {
             band: r.band,
             cells: [
                 r.name,
-                r.second || "",
+                ...extra.map(e => e.get(r)),
                 r.current == null ? null : Math.round(r.current),
                 r.band,
                 Math.round(toDisplayDistance(r.currentDistanceKm, config.unit)),
@@ -37,7 +41,7 @@ export function buildScorecardTable(opts) {
             ]
         };
     });
-    return { header, body, rules, kind };
+    return { header, body, rules, kind, textCols };
 }
 
 function titleLines({ database, scopeName, rangeText, config, kind }) {
@@ -73,7 +77,7 @@ export async function exportScorecardExcel(opts) {
         c.value = h;
         c.font = { name: "Roboto", bold: true, color: { argb: "FFFFFFFF" }, size: 10 };
         c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF" + NAVY } };
-        c.alignment = { vertical: "middle", horizontal: i >= 2 ? "center" : "left", wrapText: true };
+        c.alignment = { vertical: "middle", horizontal: i >= table.textCols ? "center" : "left", wrapText: true };
         c.border = { bottom: { style: "thin", color: { argb: "FF" + BLUE } } };
     });
     headerRow.height = 32;
@@ -83,22 +87,22 @@ export async function exportScorecardExcel(opts) {
         r.cells.forEach((v, i) => {
             const c = row.getCell(i + 1);
             c.value = v == null ? "—" : v;
-            c.font = { name: "Roboto", size: 10, color: { argb: "FF" + INK }, bold: i === 2 };
-            c.alignment = { horizontal: i >= 2 ? "center" : "left" };
+            c.font = { name: "Roboto", size: 10, color: { argb: "FF" + INK }, bold: i === table.textCols };
+            c.alignment = { horizontal: i >= table.textCols ? "center" : "left" };
             const fill = BAND_FILL[r.band];
             if (fill) c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF" + fill } };
             else if (idx % 2 === 1) c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF" + LIGHT } };
-            if (i === 4) c.numFmt = "#,##0";
+            if (i === table.textCols + 2) c.numFmt = "#,##0";
         });
     });
 
     ws.autoFilter = { from: { row: 4, column: 1 }, to: { row: 4 + table.body.length, column: nCols } };
     ws.getColumn(1).width = 28;
-    ws.getColumn(2).width = 22;
-    ws.getColumn(3).width = 9;
-    ws.getColumn(4).width = 12;
-    ws.getColumn(5).width = 13;
-    for (let i = 6; i <= nCols; i++) ws.getColumn(i).width = Math.min(24, Math.max(12, table.header[i - 1].length * 0.9));
+    for (let i = 2; i <= table.textCols; i++) ws.getColumn(i).width = 24;
+    ws.getColumn(table.textCols + 1).width = 9;
+    ws.getColumn(table.textCols + 2).width = 12;
+    ws.getColumn(table.textCols + 3).width = 13;
+    for (let i = table.textCols + 4; i <= nCols; i++) ws.getColumn(i).width = Math.min(24, Math.max(12, table.header[i - 1].length * 0.9));
 
     // Scoring model sheet — the transparency GoAnalytics doesn't offer.
     const ms = wb.addWorksheet("Scoring model");
@@ -128,6 +132,7 @@ export function exportScorecardPdf(opts) {
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(lines[0])}</title>
 <style>
   @page { size: landscape; margin: 12mm; }
+  * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; color-adjust: exact !important; }
   body { font-family: Roboto, "Segoe UI", Arial, sans-serif; color: #${INK}; margin: 0; }
   .bar { background: #${NAVY}; color: #fff; padding: 10px 14px; display: flex; justify-content: space-between; align-items: baseline; }
   .bar h1 { margin: 0; font-size: 18px; font-weight: 700; }
@@ -136,7 +141,7 @@ export function exportScorecardPdf(opts) {
   .note { color: #${INK}; font-size: 9.5px; margin: 0 14px 8px; font-style: italic; }
   table { border-collapse: collapse; width: 100%; font-size: 10px; }
   th { background: #${NAVY}; color: #fff; text-align: center; padding: 6px 4px; font-weight: 600; font-size: 9px; }
-  th:first-child, th:nth-child(2), td:first-child, td:nth-child(2) { text-align: left; white-space: nowrap; }
+  th.t, td.t { text-align: left; white-space: nowrap; }
   td { padding: 4px 5px; text-align: center; border-bottom: 1px solid #e3e7ee; }
   td.score { font-weight: 700; }
   tr.High td { background: #f4cccc; } tr.Medium td { background: #fce5cd; } tr.lowexp td { background: #eeeeee; color: #667; }
@@ -146,12 +151,13 @@ export function exportScorecardPdf(opts) {
   .sw { display: inline-block; width: 12px; height: 12px; vertical-align: middle; margin-right: 4px; border: 1px solid #ccc; }
   .model { margin: 10px 14px; font-size: 9.5px; color: #${INK}; }
   .model b { color: #${BLUE}; }
+  @media print { .noprint { display: none; } }
 </style></head><body>
 <div class="bar"><h1>${esc(lines[0])}</h1><span class="brand">GPS Fleet Management Solutions · Fleet Insights</span></div>
 <div class="sub">${esc(lines[1])}</div>
-<div class="note">${esc(lines[2])}</div>
-<table><thead><tr>${table.header.map(h => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>
-${table.body.map(r => `<tr class="${r.band === "Low exposure" ? "lowexp" : esc(r.band)}">${r.cells.map((v, i) => `<td class="${i === 2 ? "score" : ""}">${v == null ? "—" : esc(typeof v === "number" ? v.toLocaleString() : v)}</td>`).join("")}</tr>`).join("\n")}
+<div class="note">${esc(lines[2])} <span class="noprint">If the rows print without colour, turn on "Background graphics" in the print dialog's More settings.</span></div>
+<table><thead><tr>${table.header.map((h, i) => `<th class="${i < table.textCols ? "t" : ""}">${esc(h)}</th>`).join("")}</tr></thead><tbody>
+${table.body.map(r => `<tr class="${r.band === "Low exposure" ? "lowexp" : esc(r.band)}">${r.cells.map((v, i) => `<td class="${i < table.textCols ? "t" : ""} ${i === table.textCols ? "score" : ""}">${v == null ? "—" : esc(typeof v === "number" ? v.toLocaleString() : v)}</td>`).join("")}</tr>`).join("\n")}
 </tbody></table>
 <div class="legend"><span><i class="sw" style="background:#f4cccc"></i>High risk (&lt; ${config.bands.medium})</span><span><i class="sw" style="background:#fce5cd"></i>Medium (${config.bands.medium}–${config.bands.low - 1})</span><span><i class="sw" style="background:#fff"></i>Low (≥ ${config.bands.low})</span><span><i class="sw" style="background:#eee"></i>Not scored (low exposure)</span></div>
 <div class="model"><b>Scoring model:</b> ${config.rules.map(r => `${esc(r.name)} ${r.weight}% (0 at ${r.maxRate}/1,000 ${config.unit === "km" ? "km" : "mi"})`).join(" · ")}. score = Σ 100 × max(0, 1 − rate ÷ maxRate) × weight.</div>

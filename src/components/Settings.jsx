@@ -30,6 +30,10 @@ export function Settings({ config, rules, devices = [], groups = [], tree, onSav
             .map(g => ({ id: g.id, name: g.name, direct: counts.get(g.id) || 0, path: tree ? pathOf(g.id, tree) : g.name }))
             .sort((a, b) => a.path.localeCompare(b.path));
     }, [groups, devices, groupQuery, tree]);
+    const parentGroups = useMemo(() => groups
+        .filter(g => g.id !== ROOT_GROUP_ID && (g.children || []).length > 0 && !/^Group[A-Za-z]+Id$/.test(g.id))
+        .map(g => ({ id: g.id, name: g.name, path: tree ? pathOf(g.id, tree) : g.name }))
+        .sort((a, b) => a.path.localeCompare(b.path)), [groups, tree]);
     const toggleGroup = id => setDraft({ ...draft, excludedGroups: excludedGroups.has(id) ? (draft.excludedGroups || []).filter(x => x !== id) : [...(draft.excludedGroups || []), id] });
     const scorableCount = useMemo(() => devices.filter(d => !excludedTypes.has(typeOf(d)) && !(d.groups || []).some(g => excludedGroups.has(g.id) || (tree && [...excludedGroups].some(x => tree.descendants(x).has(g.id))))).length, [devices, excludedTypes, excludedGroups, tree]);
 
@@ -195,6 +199,14 @@ export function Settings({ config, rules, devices = [], groups = [], tree, onSav
                                 </li>
                             ))}
                         </ul>
+                        <label className="fi-field" style={{ marginTop: 10 }}>
+                            <span>Group shown next to each driver / vehicle</span>
+                            <select className="fi-input" value={draft.displayGroupId || ""} onChange={e => setDraft({ ...draft, displayGroupId: e.target.value || null })}>
+                                <option value="">All of the asset's groups</option>
+                                {parentGroups.map(g => <option key={g.id} value={g.id}>{g.path} → its sub-groups</option>)}
+                            </select>
+                        </label>
+                        <p className="fi-muted fi-small">Pick a parent such as "Locations" and each row shows which of its sub-groups the driver or vehicle belongs to (e.g. "Southern California Division"); anyone outside that family shows their other groups instead.</p>
                         <p className="fi-muted fi-small" style={{ marginTop: 10 }}>Exclude whole groups (and their sub-groups) — e.g. a yard, spares, or a trailer pool:</p>
                         <input className="fi-input" placeholder={`Search ${groups.length} groups…`} value={groupQuery} onChange={e => setGroupQuery(e.target.value)} />
                         <ul className="fi-group-list">

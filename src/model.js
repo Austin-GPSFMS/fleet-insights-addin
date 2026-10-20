@@ -24,8 +24,34 @@ export const DEFAULT_CONFIG = Object.freeze({
     // (GO Anywhere family), third-party and GoDrive-only devices. Editable in Settings.
     excludedDeviceTypes: ["None", "GoAnywhere", "GoAnywhereLite", "Gemini", "CustomDevice", "GoDriveDevice", "OldGeotab"],
     excludedGroups: [],        // group ids whose whole subtree is left out of scoring
-    weekStart: 1               // 0 = Sunday, 1 = Monday — first day of the scoring week
+    weekStart: 1,              // 0 = Sunday, 1 = Monday — first day of the scoring week
+    displayGroupId: null       // parent group whose children label each driver/vehicle (e.g. "Locations"); null = show all groups
 });
+
+/** Geotab system groups have fixed ids like GroupCompanyId / GroupVehicleId / GroupAssetTypeId. */
+export function isSystemGroupId(id) {
+    return /^Group[A-Za-z]+Id$/.test(String(id || ""));
+}
+
+/**
+ * Label a subject by the child of `config.displayGroupId` it falls under (e.g. "Southern California
+ * Division" under "Locations"). Subjects outside that family fall back to all their non-system
+ * group names. `groupIds` are the subject's own group memberships (device.groups / user.groups).
+ */
+export function displayGroupLabel(groupIds, config, tree) {
+    const ids = (groupIds || []).map(g => (typeof g === "string" ? g : g && g.id)).filter(Boolean);
+    const parent = config.displayGroupId;
+    if (parent && tree && tree.byId.has(parent)) {
+        const hits = [];
+        for (const child of tree.childrenOf.get(parent) || []) {
+            const sub = tree.descendants(child);
+            if (ids.some(id => sub.has(id))) hits.push((tree.byId.get(child) || {}).name || child);
+        }
+        if (hits.length) return hits.join(", ");
+    }
+    const names = ids.filter(id => !isSystemGroupId(id)).map(id => (tree && tree.byId.get(id) ? tree.byId.get(id).name : null)).filter(Boolean);
+    return [...new Set(names)].join(", ");
+}
 
 export function isUntrackedSerial(serial) {
     const sn = String(serial || "").trim();
@@ -148,6 +174,7 @@ export function normalizeConfig(raw) {
     c.excludedDeviceTypes = Array.isArray(c.excludedDeviceTypes) ? c.excludedDeviceTypes.map(String) : [...DEFAULT_CONFIG.excludedDeviceTypes];
     c.excludedGroups = Array.isArray(c.excludedGroups) ? c.excludedGroups.map(String) : [];
     c.weekStart = Number(c.weekStart) === 0 ? 0 : 1;
+    c.displayGroupId = c.displayGroupId ? String(c.displayGroupId) : null;
     c.version = 2;
     delete c.normalization;
     return c;

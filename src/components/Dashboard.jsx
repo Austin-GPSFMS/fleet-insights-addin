@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@geotab/zenith/dist/button/button";
 import {
     sumSeries, summarize, scoreSeries, ruleBreakdown, groupRollup, devicesUnder, breadcrumb, median,
-    fmtScore, fmtDelta, fmtDistance, fmtRate, rateUnitLabel, scoreUnitLabel, bandFor, currentPeriodLabel, ROOT_GROUP_ID
+    fmtScore, fmtDelta, fmtDistance, fmtRate, rateUnitLabel, scoreUnitLabel, bandFor, currentPeriodLabel, displayGroupLabel, ROOT_GROUP_ID
 } from "../model.js";
 import { driverLabel } from "../api.js";
 import { exportScorecardExcel, exportScorecardPdf } from "../export.js";
@@ -36,16 +36,13 @@ export function Dashboard({ config, periods, refData, data, nodeId, setNodeId, s
 
     const groupNameOf = useMemo(() => {
         const m = new Map();
-        for (const d of refData.devices) {
-            const g = (d.groups || []).map(x => refData.tree.byId.get(x.id)).filter(Boolean).map(x => x.name);
-            m.set(d.id, g.join(", "));
-        }
+        for (const d of refData.devices) m.set(d.id, displayGroupLabel(d.groups, config, refData.tree));
         return m;
-    }, [refData]);
+    }, [refData, config]);
 
     const vehicleRows = useMemo(() => scopeDevices.map(d => {
         const s = data.byDevice.get(d.id);
-        return { id: d.id, name: d.name || d.serialNumber || d.id, second: groupNameOf.get(d.id) || "", kind: "vehicle", series: s, ...summarize(s, config, focusIdx) };
+        return { id: d.id, name: d.name || d.serialNumber || d.id, group: groupNameOf.get(d.id) || "", second: "", kind: "vehicle", series: s, ...summarize(s, config, focusIdx) };
     }), [scopeDevices, data, config, groupNameOf, focusIdx]);
 
     const vehicleMedian = useMemo(() => median(vehicleRows.map(r => r.current)), [vehicleRows]);
@@ -74,10 +71,14 @@ export function Dashboard({ config, periods, refData, data, nodeId, setNodeId, s
             if (!s) continue;
             const lt = lastTrip.get(id);
             const dev = lt ? refData.devicesById.get(lt.deviceId) : null;
-            rows.push({ id, name: driverLabel(refData.driversById.get(id)) || id, second: dev ? dev.name : "", kind: "driver", series: s, ...summarize(s, config, focusIdx) });
+            // Driver's own group membership first (User.groups); fall back to the current vehicle's groups.
+            const user = refData.driversById.get(id);
+            let group = user ? displayGroupLabel(user.groups, config, refData.tree) : "";
+            if (!group && dev) group = groupNameOf.get(dev.id) || "";
+            rows.push({ id, name: driverLabel(user) || id, group, second: dev ? dev.name : "", kind: "driver", series: s, ...summarize(s, config, focusIdx) });
         }
         return rows;
-    }, [data, scopeIds, refData, config, focusIdx]);
+    }, [data, scopeIds, refData, config, focusIdx, groupNameOf]);
 
     const crumbs = useMemo(() => breadcrumb(nodeId, refData.tree), [nodeId, refData]);
     const scopeName = crumbs[crumbs.length - 1].name;
@@ -88,6 +89,7 @@ export function Dashboard({ config, periods, refData, data, nodeId, setNodeId, s
             <span className={r.kind === "group" ? "fi-link" : ""}>{r.name}{r.kind === "group" && r.vehicles != null ? <span className="fi-muted"> · {r.vehicles} veh</span> : null}
                 {r.kind === "driver" && r.second ? <span className="fi-muted"> · {r.second}</span> : null}</span>
         ) },
+        ...(tab !== "groups" ? [{ key: "group", label: "Group", sort: r => r.group || "", render: r => r.group || <span className="fi-muted">—</span> }] : []),
         { key: "current", label: "Score / 100", sort: r => r.current, width: "24%", render: r => (
             <HBar value={r.current} max={100} label={fmtScore(r.current)} tone={toneFor(r.band)} />
         ) },
@@ -109,7 +111,8 @@ export function Dashboard({ config, periods, refData, data, nodeId, setNodeId, s
         rows: activeRows, config, kind: tab, database: session ? session.database : "", periodIdx: focusIdx,
         scopeName, rangeText,
         subjectLabel: tab === "groups" ? "Group" : tab === "vehicles" ? "Vehicle" : "Driver",
-        secondLabel: tab === "drivers" ? "Current Vehicle" : tab === "vehicles" ? "Groups" : "Vehicles"
+        groupLabel: tab === "groups" ? null : "Group",
+        secondLabel: tab === "drivers" ? "Current Vehicle" : null
     });
     const doExport = async kind => {
         try {

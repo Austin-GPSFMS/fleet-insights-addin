@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+    displayGroupLabel, isSystemGroupId,
     buildPeriods, bucketIndex, normalizeConfig, normalizeWeights, scoreFor, subScoreFor, rateFor, bandFor, trendPct, median,
     aggregate, sumSeries, summarize, ruleBreakdown, buildGroupTree, groupRollup, devicesUnder, breadcrumb, scorableDevices
 } from "../src/model.js";
@@ -219,6 +220,26 @@ test("scorableDevices drops excluded device types and group subtrees", () => {
     assert.deepEqual(scorableDevices(devs, exclNorthYard, tree).map(d => d.id), ["v2", "t1", "u1", "u2", "v3"]);
     const exclNorth = normalizeConfig({ version: 2, excludedGroups: ["gA"] });
     assert.deepEqual(scorableDevices(devs, exclNorth, tree).map(d => d.id), []);
+});
+
+test("displayGroupLabel: sub-group of the display parent, else other non-system groups", () => {
+    const groups = [
+        { id: "GroupCompanyId", name: "Company", children: [{ id: "gLoc" }, { id: "gOps" }] },
+        { id: "gLoc", name: "Locations", children: [{ id: "gSoCal" }, { id: "gNorCal" }] },
+        { id: "gSoCal", name: "Southern California Division", children: [{ id: "gSoCalYard" }] },
+        { id: "gSoCalYard", name: "SoCal Yard", children: [] },
+        { id: "gNorCal", name: "Northern California division", children: [] },
+        { id: "gOps", name: "Operations", children: [] },
+        { id: "GroupVehicleId", name: "Vehicle", children: [] }
+    ];
+    const tree = buildGroupTree(groups);
+    const cfg = normalizeConfig({ version: 2, displayGroupId: "gLoc" });
+    assert.equal(displayGroupLabel([{ id: "gSoCalYard" }, { id: "GroupVehicleId" }], cfg, tree), "Southern California Division");
+    assert.equal(displayGroupLabel([{ id: "gOps" }, { id: "GroupVehicleId" }], cfg, tree), "Operations"); // no location → other groups
+    assert.equal(displayGroupLabel([{ id: "GroupVehicleId" }], cfg, tree), "");
+    const none = normalizeConfig({ version: 2 });
+    assert.equal(displayGroupLabel([{ id: "gSoCalYard" }, { id: "gOps" }], none, tree), "SoCal Yard, Operations");
+    assert.ok(isSystemGroupId("GroupVehicleId") && isSystemGroupId("GroupCompanyId") && !isSystemGroupId("b2A3"));
 });
 
 console.log(`\n${passed} tests passed`);
