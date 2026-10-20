@@ -86,6 +86,16 @@ const unassignedCount = await page.$$eval(".fi-perf tbody tr", r => r.length);
 log("unassigned vehicles listed:", unassignedCount);
 if (unassignedCount !== 15) throw new Error("expected 15 unassigned vehicles (a quarter of 60)");
 await page.click(".fi-chip--filter .fi-linkbtn");
+// Location picker: choose Southern California → scope follows, drivers are the division's members (+ unaffiliated drivers of its trucks)
+await page.selectOption(".fi-locpick", "gLocSoCal");
+await page.waitForSelector(".fi-crumb--current:has-text('Southern California')");
+await page.click(".fi-tab:has-text('Drivers')");
+const socalDrivers = await page.$$eval(".fi-perf tbody tr", r => r.map(x => x.children[1].textContent));
+log("SoCal drivers:", socalDrivers.length, "| groups:", [...new Set(socalDrivers)].join(" / "));
+if (socalDrivers.length === 0 || socalDrivers.length >= 25) throw new Error("location picker should narrow the driver list");
+if (socalDrivers.some(g => /Northern California|Oregon/.test(g))) throw new Error("drivers who belong to another location must not appear under SoCal");
+await page.selectOption(".fi-locpick", "__all");
+await page.waitForSelector(".fi-crumb--current:has-text('Locations')");
 await page.click(".fi-tab:has-text('Groups')");
 
 // Excluded device types: 60 GO9 trucks only — no battery trackers / untracked assets, no "Battery Trackers" group.

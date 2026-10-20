@@ -43,7 +43,10 @@ session. No proxy, no server, no data leaves Geotab. Settings are stored in the 
   group such as *Locations*. The Groups tab then opens on that group — one row per sub-group
   (Idaho division, Southern California Division, …) plus an **Unassigned vehicles** row for the
   rest of the fleet (click it to list them) — and every driver and vehicle row (on screen and in the
-  Excel/PDF exports) shows which sub-group they belong to. Drivers use
+  Excel/PDF exports) shows which sub-group they belong to. A **location picker** beside the tabs
+  pulls the Vehicles / Drivers tables and the exports for one division (or Unassigned) in a click.
+  Drivers who are members of a location (User → Groups) belong to that location whatever truck
+  they drove; drivers with no location follow the vehicles they drove in the period. Drivers use
   their own user group membership first, then their current vehicle's groups. Anyone outside that
   family shows their other (non-system) groups instead.
 - **Assets to score** (Settings) — device types present in the database with counts; untracked

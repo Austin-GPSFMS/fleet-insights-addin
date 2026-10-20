@@ -66,16 +66,33 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
 
 
     // Drivers seen on in-scope vehicles; "current vehicle" = device of their most recent trip.
+    // Location family: the display group's subtree. A driver who is a member of a location
+    // (User.groups) belongs to that location regardless of which truck they drove; a driver with
+    // no location membership follows the vehicles they drove in the period.
+    const family = useMemo(() => (homeId !== ROOT_GROUP_ID ? refData.tree.descendants(homeId) : null), [homeId, refData]);
+    const nodeSubtree = useMemo(() => refData.tree.descendants(nodeId), [nodeId, refData]);
+    const wholeFleetScope = wholeFleet.includes(nodeId);
     const driverRows = useMemo(() => {
         const seen = new Set();
         const lastTrip = new Map();
-        for (const e of data.exceptions) if (e.driver && scopeIds.has(e.device && e.device.id)) seen.add(e.driver.id);
+        const driverInFamily = user => !!(family && user && (user.groups || []).some(g => family.has(g.id)));
+        const driverInNode = user => !!(user && (user.groups || []).some(g => nodeSubtree.has(g.id)));
+        // last trip per driver — within the scope when a location is selected, otherwise fleet-wide
         for (const t of data.trips) {
-            if (!t.driver || !scopeIds.has(t.device && t.device.id)) continue;
-            seen.add(t.driver.id);
+            if (!t.driver) continue;
+            if (!wholeFleetScope && !scopeIds.has(t.device && t.device.id)) continue;
             const ts = Date.parse(t.start);
             const prev = lastTrip.get(t.driver.id);
-            if (!prev || ts > prev.ts) lastTrip.set(t.driver.id, { ts, deviceId: t.device.id });
+            if (!prev || ts > prev.ts) lastTrip.set(t.driver.id, { ts, deviceId: t.device && t.device.id });
+        }
+        const drove = new Set();
+        for (const e of data.exceptions) if (e.driver && scopeIds.has(e.device && e.device.id)) drove.add(e.driver.id);
+        for (const t of data.trips) if (t.driver && scopeIds.has(t.device && t.device.id)) drove.add(t.driver.id);
+        for (const id of data.byDriver.keys()) {
+            const user = refData.driversById.get(id);
+            if (wholeFleetScope) { if (drove.has(id) || driverInFamily(user)) seen.add(id); continue; }
+            if (driverInFamily(user)) { if (driverInNode(user)) seen.add(id); }   // member of a location → only that location
+            else if (drove.has(id)) seen.add(id);                                 // no location → by vehicles driven
         }
         const rows = [];
         for (const id of seen) {
@@ -83,14 +100,17 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
             if (!s) continue;
             const lt = lastTrip.get(id);
             const dev = lt ? refData.devicesById.get(lt.deviceId) : null;
-            // Driver's own group membership first (User.groups); fall back to the current vehicle's groups.
+            // Location members are labelled by their own membership; everyone else takes the
+            // current vehicle's location, then their own other groups as a last resort.
             const user = refData.driversById.get(id);
-            let group = user ? displayGroupLabel(user.groups, config, refData.tree) : "";
-            if (!group && dev) group = groupNameOf.get(dev.id) || "";
+            let group = "";
+            if (driverInFamily(user)) group = displayGroupLabel(user.groups, config, refData.tree);
+            else if (dev) group = groupNameOf.get(dev.id) || "";
+            if (!group && user) group = displayGroupLabel(user.groups, config, refData.tree);
             rows.push({ id, name: driverLabel(user) || id, group, second: dev ? dev.name : "", kind: "driver", series: s, ...summarize(s, config, focusIdx) });
         }
         return rows;
-    }, [data, scopeIds, refData, config, focusIdx, groupNameOf]);
+    }, [data, scopeIds, refData, config, focusIdx, groupNameOf, family, nodeSubtree, wholeFleetScope]);
 
     const crumbs = useMemo(() => breadcrumb(nodeId, refData.tree), [nodeId, refData]);
     const scopeName = crumbs[crumbs.length - 1].name;
@@ -187,6 +207,23 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
                             </nav>
                         </div>
                         <div className="fi-actions">
+                            {homeId !== ROOT_GROUP_ID && (
+                                <select className="fi-input fi-input--inline fi-locpick" aria-label="Location"
+                                        value={unassignedOnly ? "__unassigned" : (refData.tree.childrenOf.get(homeId) || []).includes(nodeId) ? nodeId : nodeId === homeId ? "__all" : "__other"}
+                                        onChange={e => {
+                                            const v = e.target.value;
+                                            if (v === "__all") { setUnassignedOnly(false); setNodeId(homeId); }
+                                            else if (v === "__unassigned") { setNodeId(homeId); setTab(tab === "groups" ? "vehicles" : tab); setTimeout(() => setUnassignedOnly(true), 0); }
+                                            else { setUnassignedOnly(false); setNodeId(v); }
+                                        }}>
+                                    <option value="__all">All {(refData.tree.byId.get(homeId) || {}).name || "locations"}</option>
+                                    {(refData.tree.childrenOf.get(homeId) || []).map(cid => (
+                                        <option key={cid} value={cid}>{(refData.tree.byId.get(cid) || {}).name || cid}</option>
+                                    ))}
+                                    <option value="__unassigned">Unassigned vehicles</option>
+                                    {nodeId !== homeId && !(refData.tree.childrenOf.get(homeId) || []).includes(nodeId) && <option value="__other">{(refData.tree.byId.get(nodeId) || {}).name || nodeId}</option>}
+                                </select>
+                            )}
                             <div className="fi-tabs" role="tablist">
                                 {[["groups", `Groups (${groupRows.length})`], ["vehicles", `Vehicles (${vehicleRows.length})`], ["drivers", `Drivers (${driverRows.length})`]].map(([k, l]) => (
                                     <button key={k} role="tab" aria-selected={tab === k} className={`fi-tab ${tab === k ? "fi-tab--on" : ""}`} onClick={() => pickTab(k)}>{l}</button>
