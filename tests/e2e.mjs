@@ -232,6 +232,149 @@ await page.reload();
 await page.waitForFunction(() => window.__initialized);
 await page.waitForSelector(".fi-dash", { timeout: 60000 });
 log("config reloaded from database on refresh");
+
+/* ---- 7) Scope: a sub-group as the Report-by anchor only reports its own vehicles ---- */
+const reportBy = ".fi-reportby select";
+await page.selectOption(reportBy, "gNorth");
+await page.waitForSelector(".fi-crumb--current:has-text('North Division')");
+const northVeh = await page.$eval(".fi-tab:has-text('Vehicles')", e => e.textContent);
+const outsideNote = await page.$eval(".fi-outside", e => e.textContent);
+log("report by North Division:", northVeh, "|", outsideNote.slice(0, 70));
+if (!/Vehicles \(24\)/.test(northVeh)) throw new Error("North Division as the anchor must only contain its 24 vehicles");
+if (!/36 vehicles outside North Division are not included/.test(outsideNote)) throw new Error("outside note missing");
+await page.click(".fi-tab:has-text('Drivers')");
+const northDriverVehicles = await page.$$eval(".fi-perf tbody tr td:first-child", tds => tds.map(t => t.textContent));
+if (northDriverVehicles.length === 0 || northDriverVehicles.length >= 25) throw new Error("drivers should be limited to those who drove North Division vehicles");
+await page.click(".fi-tab:has-text('Groups')");
+await page.click(".fi-outside button");                               // include them as Unassigned
+await page.waitForSelector(".fi-perf tbody tr:has-text('Unassigned vehicles')");
+if (!/Vehicles \(60\)/.test(await page.$eval(".fi-tab:has-text('Vehicles')", e => e.textContent))) throw new Error("include-outside should bring the fleet back");
+await page.click(".fi-outside button");                               // leave them out again
+await page.waitForFunction(() => /Vehicles \(24\)/.test(document.querySelector(".fi-tabs").textContent));
+await page.selectOption(reportBy, "gLoc");
+await page.waitForSelector(".fi-crumb--current:has-text('Locations')");
+if (!/Vehicles \(60\)/.test(await page.$eval(".fi-tab:has-text('Vehicles')", e => e.textContent))) throw new Error("Locations covers 75% of the fleet → the rest stay as Unassigned");
+
+/* ---- 8) Combined groups: create from the picker, see it as a row, open it ---- */
+await page.selectOption(".fi-locpick", "__new");
+await page.waitForSelector(".fi-cg-editor");
+await page.fill(".fi-cg-name", "SoCal + Oregon");
+await page.check("input[aria-label='Include Locations / Southern California Division']");
+await page.check("input[aria-label='Include Locations / Oregon division']");
+const cgLive = await page.$eval(".fi-cg-head .fi-small", e => e.textContent);
+if (!/^30 vehicles/.test(cgLive)) throw new Error("live vehicle count for the combined group should be 30, got " + cgLive);
+await page.click("button:has-text('Add combined group')");
+// second one: a parent minus one of its children; left un-added on purpose → Save settings must still keep it
+await page.fill(".fi-cg-name", "Locations w/o NorCal");
+await page.check("input[aria-label='Include Locations']");
+await page.check("input[aria-label='Exclude Locations / Northern California division']");
+await page.click("button:has-text(\"Save settings\")");
+await page.waitForSelector(".fi-dash", { timeout: 60000 });
+await page.waitForSelector(".fi-perf tbody tr:has-text('SoCal + Oregon')");
+const cgRowsText = await page.$$eval(".fi-perf tbody tr:has(.fi-tag)", r => r.map(x => x.querySelector("td").textContent));
+log("combined rows:", cgRowsText.join(" | "));
+if (cgRowsText.length !== 2 || !cgRowsText.every(t => /30 veh/.test(t))) throw new Error("expected two combined groups with 30 vehicles each");
+const cgValue = await page.$$eval(".fi-locpick optgroup option", o => o.map(x => [x.value, x.textContent]));
+const socalOregon = cgValue.find(([, t]) => t === "SoCal + Oregon")[0];
+await page.selectOption(".fi-locpick", socalOregon);
+await page.waitForSelector(".fi-crumb--current:has-text('SoCal + Oregon')");
+const cgChildren = await page.$$eval(".fi-perf tbody tr td:first-child", tds => tds.map(t => t.textContent));
+log("inside combined group:", cgChildren.join(" | "));
+if (cgChildren.length !== 2 || !cgChildren.some(t => /Oregon/.test(t)) || !cgChildren.some(t => /Southern California/.test(t))) throw new Error("combined group should compare its two members");
+await page.click(".fi-tab:has-text('Vehicles')");
+const cgVeh = await page.$$eval(".fi-perf tbody tr td:nth-child(2)", tds => [...new Set(tds.map(t => t.textContent))]);
+if (cgVeh.some(g => /Northern California/.test(g))) throw new Error("NorCal vehicles must not appear in SoCal + Oregon");
+if (!/Vehicles \(30\)/.test(await page.$eval(".fi-tab--on", e => e.textContent))) throw new Error("combined group should hold 30 vehicles");
+
+/* ---- 9) Date range: applied on demand, keeps the tab, compares with the range before, and going back is instant ---- */
+const d = k => { const x = new Date(); x.setDate(x.getDate() + k); const p = v => String(v).padStart(2, "0"); return `${x.getFullYear()}-${p(x.getMonth() + 1)}-${p(x.getDate())}`; };
+const tripCalls = () => page.evaluate(() => window.__mock.calls.filter(c => c.typeName === "Trip").length);
+const before9 = await tripCalls();
+await page.fill(".fi-range input[aria-label='From date']", d(-14));
+await page.fill(".fi-range input[aria-label='To date']", d(-1));
+if (await tripCalls() !== before9) throw new Error("typing dates must not fetch anything");
+await page.click(".fi-range button:has-text('Apply')");
+await page.waitForFunction(() => document.querySelectorAll(".fi-dash .fi-bar-group").length === 2, null, { timeout: 60000 });
+const sub9 = await page.$eval(".fi-sub", e => e.textContent);
+const kpi9 = await page.$eval(".fi-kpi-title", e => e.textContent);
+const tab9 = await page.$eval(".fi-tab--on", e => e.textContent);
+log("date range:", sub9.split("·").slice(0, 2).join("·").trim(), "| kpi:", kpi9, "| tab:", tab9);
+if (!/Custom date range/.test(sub9)) throw new Error("header should say custom date range");
+if (!/SoCal \+ Oregon score — /.test(kpi9) || /week/.test(kpi9)) throw new Error("KPI should be titled with the date range");
+if (!/Vehicles \(30\)/.test(tab9)) throw new Error("tab and scope should survive applying a date range");
+const fetched9 = await tripCalls();
+if (!(fetched9 > before9)) throw new Error("applying a range should fetch that window");
+// drawer labels use the dates, not "this week"
+await page.click(".fi-perf tbody tr >> nth=0");
+await page.waitForSelector(".fi-drawer");
+const drawerTitle = await page.$eval(".fi-drawer .fi-kpi-title", e => e.textContent);
+if (/week|period starting/.test(drawerTitle)) throw new Error("drawer should label the custom range by its dates: " + drawerTitle);
+await page.keyboard.press("Escape");
+await page.waitForSelector(".fi-drawer", { state: "detached" });
+// range export carries the dates
+await page.click("text=Export ▾");
+const [popup9] = await Promise.all([page.waitForEvent("popup"), page.click("text=PDF scorecard")]);
+await popup9.waitForLoadState("domcontentloaded");
+const sub9pdf = await popup9.$eval(".sub", e => e.textContent);
+await popup9.close();
+if (!/SoCal \+ Oregon/.test(sub9pdf) || /to date/.test(sub9pdf)) throw new Error("PDF subtitle should carry the group and the plain date range: " + sub9pdf);
+// too-long range is refused without fetching
+await page.fill(".fi-range input[aria-label='From date']", d(-200));
+await page.click(".fi-range button:has-text('Apply')");
+await page.waitForSelector(".fi-toast--warn:has-text('limited to 92 days')");
+// back to the weekly trend: served from cache, no new calls
+await page.click("button:has-text('Back to weekly trend')");
+await page.waitForFunction(() => document.querySelectorAll(".fi-dash .fi-bar-group").length === 8, null, { timeout: 60000 });
+if (await tripCalls() !== fetched9) throw new Error("returning to the weekly trend should come from cache");
+log("back to weekly trend from cache; trip calls unchanged at", fetched9);
+// quick pick applies immediately
+await page.selectOption(".fi-range select", "7");
+await page.waitForFunction(() => document.querySelectorAll(".fi-dash .fi-bar-group").length === 2, null, { timeout: 60000 });
+await page.screenshot({ path: join(here, "shots/06-date-range.png"), fullPage: false });
+await page.click("button:has-text('Back to weekly trend')");
+await page.waitForFunction(() => document.querySelectorAll(".fi-dash .fi-bar-group").length === 8, null, { timeout: 60000 });
+await page.selectOption(".fi-locpick", "__all");
+await page.click(".fi-tab:has-text('Groups')");
+
+/* ---- 10) Division weights: NorCal gets its own weights; only NorCal's score moves ---- */
+await page.click("button:has-text('Show last full week')");
+await page.waitForSelector(".fi-h3sub:has-text('week of')");
+const rowScore = async name => parseInt(await page.$eval(`.fi-perf tbody tr:has-text('${name}') .fi-hbar-label`, e => e.textContent), 10);
+const norBefore = await rowScore("Northern California division"), soBefore = await rowScore("Southern California Division");
+await page.click("button:has-text('Settings')");
+await page.waitForSelector(".fi-profilebar");
+const candidates = await page.$$eval(".fi-profilebar select[aria-label='Add weights for a group'] option", o => o.map(x => x.textContent));
+if (!/Northern California|Oregon|Southern California/.test(candidates[1])) throw new Error("the Report-by group's divisions should be offered first: " + candidates[1]);
+await page.selectOption(".fi-profilebar select[aria-label='Add weights for a group']", "gLocNorCal");
+await page.waitForSelector(".fi-profilehint:has-text('Northern California division')");
+// take seat belt (the most frequent event in the mock) down to 0 without rebalancing → save must refuse and name the division
+const sbRow = ".fi-settings .fi-table tbody tr:has-text('Driver Seat Belt')";
+await page.fill(`${sbRow} input[type=number]`, "0");
+await page.click("button:has-text(\"Save settings\")");
+await page.waitForSelector("text=The weights for Northern California division total");
+await page.click("button:has-text(\"Rebalance to 100%\")");
+if (!/^100% of 100%/.test(await page.$eval(".fi-total", e => e.textContent))) throw new Error("rebalance should bring the division weights to 100%");
+// default weights are untouched
+await page.selectOption(".fi-profilebar select[aria-label='Weights for']", "");
+const defSb = await page.$eval(`${sbRow} input[type=number]`, e => e.value);
+if (defSb === "0") throw new Error("editing a division's weights must not change the default weights");
+await page.click("button:has-text(\"Save settings\")");
+await page.waitForSelector(".fi-dash", { timeout: 60000 });
+await page.click("button:has-text('Show last full week')");
+await page.waitForSelector(".fi-h3sub:has-text('week of')");
+const norAfter = await rowScore("Northern California division"), soAfter = await rowScore("Southern California Division");
+const note10 = await page.$eval(".fi-weightsnote", e => e.textContent);
+log("division weights → NorCal", norBefore, "→", norAfter, "| SoCal", soBefore, "→", soAfter, "|", note10.slice(0, 60));
+if (!(norAfter > norBefore)) throw new Error("NorCal's score should rise once seat belt carries no weight there");
+if (soAfter !== soBefore) throw new Error("SoCal's score must not change");
+if (!/mixed/.test(note10)) throw new Error("the all-locations view should say the weights are mixed");
+await page.click(".fi-perf tbody tr:has-text('Northern California division') .fi-minibtn:has-text('Vehicles')");
+await page.waitForSelector(".fi-weightsnote:has-text('Weights: Northern California division')");
+const sbWeight = await page.$eval(".fi-dash .fi-grid-2 > section:nth-child(2) tr:has-text('Driver Seat Belt') td", e => e.textContent);
+if (!/· 0%/.test(sbWeight)) throw new Error("NorCal's rule list should show its own weight: " + sbWeight);
+await page.selectOption(".fi-locpick", "__all");
+await page.click(".fi-tab:has-text('Groups')");
+await page.screenshot({ path: join(here, "shots/02-dashboard.png"), fullPage: false });
 await page.close();
 
 /* ===================== run 2: server without a Dismissed state → local hide ===================== */

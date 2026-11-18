@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@geotab/zenith/dist/button/button";
 import {
-    sumSeries, summarize, scoreSeries, ruleBreakdown, groupRollup, devicesUnder, breadcrumb, median,
-    fmtScore, fmtDelta, fmtDistance, fmtRate, rateUnitLabel, scoreUnitLabel, bandFor, currentPeriodLabel, displayGroupLabel, ROOT_GROUP_ID
+    sumSeries, summarize, scoreSeries, ruleBreakdown, groupRollup, median,
+    resolveScope, inScope, devicesInScope, shouldIncludeOutside, focusLabel, lastBarLabel, CUSTOM_PREFIX, profilesAt, DEFAULT_PROFILE,
+    fmtScore, fmtDelta, fmtDistance, fmtRate, rateUnitLabel, scoreUnitLabel, bandFor, displayGroupLabel, ROOT_GROUP_ID
 } from "../model.js";
 import { driverLabel } from "../api.js";
 import { exportScorecardExcel, exportScorecardPdf } from "../export.js";
@@ -10,13 +11,23 @@ import { BarTrend, Sparkline, HBar, Trend, BandPill } from "./Charts.jsx";
 import { SortableTable, toCsv, downloadText } from "./Table.jsx";
 import { Detail } from "./Detail.jsx";
 
-export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, setNodeId, session, onDismiss, notify, onSetDisplayGroup }) {
-    const [tab, setTab] = useState("groups");
+export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, setNodeId, session, onDismiss, notify, onSetDisplayGroup,
+                            range, onSetRange, onOpenSettings, onSetIncludeOutside, tab, setTab }) {
     const [unassignedOnly, setUnassignedOnly] = useState(false);
+    const tree = refData.tree;
     // Home node: the display group (e.g. "Locations") when one is configured, else the company root.
-    const homeId = config.displayGroupId && refData.tree.byId.has(config.displayGroupId) ? config.displayGroupId : ROOT_GROUP_ID;
-    const nodeId = nodeIdProp || homeId;
-    const wholeFleet = useMemo(() => [ROOT_GROUP_ID, homeId], [homeId]);
+    const homeId = config.displayGroupId && tree.byId.has(config.displayGroupId) ? config.displayGroupId : ROOT_GROUP_ID;
+    const homeScope = useMemo(() => resolveScope(homeId, tree, config, homeId), [homeId, tree, config]);
+    // Vehicles outside the Report-by group. They are only reported (as "Unassigned") when the group
+    // is meant to cover the whole fleet — otherwise picking one division would drag everyone else in.
+    const outsideCount = useMemo(() => (homeScope.wholeFleet ? 0 : refData.devices.length - devicesInScope(homeScope, refData.devices).length), [homeScope, refData]);
+    const includeOutside = shouldIncludeOutside(config, outsideCount, refData.devices.length);
+    const scope = useMemo(() => {
+        const sc = resolveScope(nodeIdProp || homeId, tree, config, homeId);
+        return sc.id === homeId && includeOutside ? { ...sc, wholeFleet: true } : sc;
+    }, [nodeIdProp, homeId, tree, config, includeOutside]);
+    const nodeId = scope.id;
+    const customGroups = config.customGroups || [];
     useEffect(() => { setUnassignedOnly(false); }, [nodeId]);
     const pickTab = k => { setTab(k); setUnassignedOnly(false); };
     const [detail, setDetail] = useState(null); // { kind: "vehicle"|"driver", id }
@@ -24,14 +35,16 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
     // Which period the KPIs / tables / rule list describe. Default: the current (to-date) period;
     // click a bar in the trend to focus a completed one — same gesture as the drawer.
     const [focusIdx, setFocusIdx] = useState(n - 1);
-    useEffect(() => { setFocusIdx(n - 1); }, [n, config.period]);
+    const rangeMode = !!range;
+    useEffect(() => { setFocusIdx(n - 1); }, [n, config.period, range && range.from, range && range.to]); // eslint-disable-line react-hooks/exhaustive-deps
     const isCurrent = focusIdx === n - 1;
     const focus = periods[focusIdx] || periods[n - 1];
     const labels = periods.map(p => p.label);
-    const curLabel = currentPeriodLabel(config.period);
-    const focusText = isCurrent ? `${curLabel.toLowerCase()} to date` : `${periodLabel(config)} of ${focus.label}`;
+    const lastLabel = lastBarLabel(periods, config);
+    const focusText = focusLabel(periods, focusIdx, config);
+    const prevText = rangeMode ? (focus.days === 1 ? "the day before" : `the previous ${focus.days} days`) : `the ${periodLabel(config)} before`;
 
-    const scopeDevices = useMemo(() => devicesUnder(nodeId, refData.tree, refData.devices, wholeFleet), [nodeId, refData, wholeFleet]);
+    const scopeDevices = useMemo(() => devicesInScope(scope, refData.devices), [scope, refData]);
     const scopeIds = useMemo(() => new Set(scopeDevices.map(d => d.id)), [scopeDevices]);
 
     const fleetSeries = useMemo(
@@ -47,10 +60,18 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
         return m;
     }, [refData, config]);
 
-    const groupRows = useMemo(
-        () => groupRollup({ nodeId, tree: refData.tree, devices: scopeDevices, byDevice: data.byDevice, config, nPeriods: n, idx: focusIdx }),
-        [nodeId, refData, scopeDevices, data, config, n, focusIdx]
+    const realGroupRows = useMemo(
+        () => groupRollup({ nodeId, tree, devices: scopeDevices, byDevice: data.byDevice, config, nPeriods: n, idx: focusIdx, childIds: scope.childIds }),
+        [nodeId, tree, scopeDevices, data, config, n, focusIdx, scope]
     );
+    // Combined groups (Settings → Combined groups) are listed beside the real ones at the home level.
+    const customRows = useMemo(() => (nodeId !== homeId ? [] : customGroups.map(cg => {
+        const sc = resolveScope(CUSTOM_PREFIX + cg.id, tree, config, homeId);
+        const devs = devicesInScope(sc, refData.devices);
+        const series = sumSeries(devs.map(d => data.byDevice.get(d.id)).filter(Boolean), n);
+        return { id: sc.id, name: cg.name, kind: "custom", vehicles: devs.length, hasChildren: sc.childIds.length > 1, series, ...summarize(series, config, focusIdx) };
+    })), [nodeId, homeId, customGroups, tree, config, refData, data, n, focusIdx]);
+    const groupRows = useMemo(() => [...realGroupRows, ...customRows], [realGroupRows, customRows]);
 
     const unassignedIds = useMemo(() => {
         const row = groupRows.find(r => r.kind === "unassigned");
@@ -72,18 +93,17 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
     // (User.groups) belongs to that location regardless of which truck they drove; a driver with
     // no location membership follows the vehicles they drove in the period.
     const family = useMemo(() => (homeId !== ROOT_GROUP_ID ? refData.tree.descendants(homeId) : null), [homeId, refData]);
-    const nodeSubtree = useMemo(() => refData.tree.descendants(nodeId), [nodeId, refData]);
-    const wholeFleetScope = wholeFleet.includes(nodeId);
+    const wholeFleetScope = scope.wholeFleet;
     /**
-     * Drivers for a scope. `ids` = device ids in scope, `subtree` = group ids of the node (null for
-     * whole fleet). Members of a location belong to that location whatever truck they drove;
+     * Drivers for a scope. `ids` = device ids in scope, `sc` = the scope (null for the unassigned
+     * bucket). Members of a location belong to that location whatever truck they drove;
      * drivers with no location membership follow the vehicles they drove.
      */
-    const buildDriverRows = useCallback((ids, subtree, isWholeFleet) => {
+    const buildDriverRows = useCallback((ids, sc, isWholeFleet) => {
         const seen = new Set();
         const lastTrip = new Map();
         const driverInFamily = user => !!(family && user && (user.groups || []).some(g => family.has(g.id)));
-        const driverInNode = user => !!(user && subtree && (user.groups || []).some(g => subtree.has(g.id)));
+        const driverInNode = user => !!(user && sc && inScope(user.groups, sc));
         for (const t of data.trips) {
             if (!t.driver) continue;
             if (!isWholeFleet && !ids.has(t.device && t.device.id)) continue;
@@ -115,28 +135,37 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
         }
         return rows;
     }, [data, refData, config, focusIdx, groupNameOf, family]);
-    const driverRows = useMemo(() => buildDriverRows(scopeIds, nodeSubtree, wholeFleetScope), [buildDriverRows, scopeIds, nodeSubtree, wholeFleetScope]);
+    const driverRows = useMemo(() => buildDriverRows(scopeIds, scope, wholeFleetScope), [buildDriverRows, scopeIds, scope, wholeFleetScope]);
 
-    const crumbs = useMemo(() => breadcrumb(nodeId, refData.tree), [nodeId, refData]);
+    const crumbs = scope.crumbs;
+    const homeName = homeScope.name;
+    const homeChildren = homeScope.childIds;
+    // Vehicles at the home level that sit under none of its sub-groups (the "Unassigned" bucket).
+    const homeUnassigned = useMemo(() => {
+        const sc = includeOutside ? { ...homeScope, wholeFleet: true } : homeScope;
+        const sets = homeChildren.map(c => tree.descendants(c));
+        return devicesInScope(sc, refData.devices).filter(d => !sets.some(set => (d.groups || []).some(g => set.has(g.id)))).length;
+    }, [homeScope, homeChildren, includeOutside, tree, refData]);
     // Parent groups a report can be anchored on (have children, not system groups).
     const parentGroups = useMemo(() => refData.groups
         .filter(g => g.id !== ROOT_GROUP_ID && (g.children || []).length > 0 && !/^Group[A-Za-z]+Id$/.test(g.id))
         .map(g => ({ id: g.id, name: g.name }))
         .sort((a, b) => a.name.localeCompare(b.name)), [refData]);
     const suggestedParent = useMemo(() => parentGroups.find(g => /location|division|region|branch|district|site|yard/i.test(g.name)) || null, [parentGroups]);
-    const scopeName = crumbs[crumbs.length - 1].name;
+    const scopeName = scope.name;
 
     const activeRows = tab === "groups" ? groupRows : tab === "vehicles" ? vehicleRows : driverRows;
     const columns = useMemo(() => [
         { key: "name", label: tab === "groups" ? "Group" : tab === "vehicles" ? "Vehicle" : "Driver", sort: r => r.name, render: r => (
-            <span className={r.kind === "group" || r.kind === "unassigned" ? "fi-link" : ""}>{r.name}{(r.kind === "group" || r.kind === "unassigned") && r.vehicles != null ? <span className="fi-muted"> · {r.vehicles} veh</span> : null}
+            <span className={r.kind === "group" || r.kind === "unassigned" || r.kind === "custom" ? "fi-link" : ""}>{r.name}{(r.kind === "group" || r.kind === "unassigned" || r.kind === "custom") && r.vehicles != null ? <span className="fi-muted"> · {r.vehicles} veh</span> : null}
+                {r.kind === "custom" ? <span className="fi-tag">combined</span> : null}
                 {r.kind === "driver" && r.second ? <span className="fi-muted"> · {r.second}</span> : null}</span>
         ) },
         ...(tab === "groups" ? [{ key: "open", label: "Open", sort: r => r.vehicles, render: r => (
             <span className="fi-rowlinks" onClick={e => e.stopPropagation()}>
-                {r.kind === "group" && r.hasChildren && <button className="fi-minibtn" onClick={() => drillTo(r)}>Sub-groups</button>}
-                {r.kind === "group" && <button className="fi-minibtn" onClick={() => drillTo(r, "vehicles")}>Vehicles</button>}
-                {r.kind === "group" && <button className="fi-minibtn" onClick={() => drillTo(r, "drivers")}>Drivers</button>}
+                {(r.kind === "group" || r.kind === "custom") && r.hasChildren && <button className="fi-minibtn" onClick={() => drillTo(r, "groups")}>Sub-groups</button>}
+                {(r.kind === "group" || r.kind === "custom") && <button className="fi-minibtn" onClick={() => drillTo(r, "vehicles")}>Vehicles</button>}
+                {(r.kind === "group" || r.kind === "custom") && <button className="fi-minibtn" onClick={() => drillTo(r, "drivers")}>Drivers</button>}
                 {r.kind === "unassigned" && <button className="fi-minibtn" onClick={() => { setTab("vehicles"); setUnassignedOnly(true); }}>Vehicles</button>}
             </span>
         ) }] : []),
@@ -148,44 +177,45 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
         { key: "currentEvents", label: "Events", sort: r => r.currentEvents, align: "right", render: r => r.currentEvents.toLocaleString() },
         { key: "currentDistanceKm", label: "Distance", sort: r => r.currentDistanceKm, align: "right", csv: r => Math.round(r.currentDistanceKm), render: r => fmtDistance(r.currentDistanceKm, config.unit) },
         { key: "band", label: "Risk", sort: r => ({ High: 0, Medium: 1, Low: 2 }[r.band] ?? 3), render: r => <BandPill band={r.band} /> },
-        { key: "spark", label: `Last ${n}`, sort: r => r.current, csv: r => r.scores.map(fmtScore).join(" | "), render: r => <Sparkline values={r.scores.map(v => (v == null ? 0 : v))} /> }
-    ], [tab, config.unit, n]);
+        ...(rangeMode ? [] : [{ key: "spark", label: `Last ${n}`, sort: r => r.current, csv: r => r.scores.map(fmtScore).join(" | "), render: r => <Sparkline values={r.scores.map(v => (v == null ? 0 : v))} /> }])
+    ], [tab, config.unit, n, rangeMode]);
 
     // Clicking a group drills into it. A group with sub-groups stays on the Groups tab (compare
     // its children); a leaf group (a division) jumps straight to its individual scores — the
     // Vehicles or Drivers tab, whichever was used last.
     const [lastIndividualTab, setLastIndividualTab] = useState("vehicles");
     useEffect(() => { if (tab === "vehicles" || tab === "drivers") setLastIndividualTab(tab); }, [tab]);
-    const drillTo = (row, individualTab) => {
+    const drillTo = (row, targetTab) => {
         setNodeId(row.id);
-        if (individualTab) setTab(individualTab);
+        if (targetTab) setTab(targetTab);
         else if (!row.hasChildren) setTab(lastIndividualTab);
     };
     const onRow = row => {
-        if (row.kind === "group") drillTo(row);
+        if (row.kind === "group" || row.kind === "custom") drillTo(row);
         else if (row.kind === "unassigned") { setTab("vehicles"); setUnassignedOnly(true); }
         else setDetail({ kind: row.kind, id: row.id });
     };
 
-    const rangeText = `${new Date(focus.start).toLocaleDateString()} – ${new Date(focus.end).toLocaleDateString()}${isCurrent ? ` (${curLabel.toLowerCase()} to date)` : ""}`;
+    const rangeText = `${new Date(focus.start).toLocaleDateString()} – ${new Date(focus.end).toLocaleDateString()}${focus.partial ? ` (${focusText})` : ""}`;
     // When exporting the group comparison, add one sheet / page per group with its vehicles and drivers.
     const exportSections = () => {
         if (tab !== "groups") return [];
         return groupRows.map(g => {
+            const sc = g.kind === "unassigned" ? null : resolveScope(g.id, tree, config, homeId);
             const devs = g.kind === "unassigned"
                 ? scopeDevices.filter(d => unassignedIds.has(d.id))
-                : devicesUnder(g.id, refData.tree, scopeDevices);
+                : devicesInScope(sc, g.kind === "custom" ? refData.devices : scopeDevices);
             const ids = new Set(devs.map(d => d.id));
-            const subtree = g.kind === "unassigned" ? null : refData.tree.descendants(g.id);
             return {
                 title: g.name,
                 vehicles: { rows: buildVehicleRows(devs), subjectLabel: "Vehicle", groupLabel: "Group", secondLabel: null },
-                drivers: { rows: buildDriverRows(ids, subtree, false), subjectLabel: "Driver", groupLabel: "Group", secondLabel: "Current Vehicle" }
+                drivers: { rows: buildDriverRows(ids, sc, false), subjectLabel: "Driver", groupLabel: "Group", secondLabel: "Current Vehicle" }
             };
         });
     };
     const exportOpts = () => ({
         rows: activeRows, config, kind: tab, database: session ? session.database : "", periodIdx: focusIdx, sections: exportSections(),
+        profileNames: Object.fromEntries((config.profiles || []).map(p => [p.id, (tree.byId.get(p.groupId) || {}).name || p.groupId])),
         scopeName, rangeText,
         subjectLabel: tab === "groups" ? "Group" : tab === "vehicles" ? "Vehicle" : "Driver",
         groupLabel: tab === "groups" ? null : "Group",
@@ -203,17 +233,25 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
     };
 
     const maxImpact = Math.max(0, ...rules.map(r => r.impact));
+    // Which weight profiles are in play for what is on screen (only relevant when divisions have their own weights).
+    const weightsNote = useMemo(() => {
+        if (!(config.profiles || []).length) return null;
+        const keys = profilesAt(fleetSeries, focusIdx);
+        if (!keys.length) return null;
+        const names = keys.map(k => (k === DEFAULT_PROFILE ? "default" : ((tree.byId.get((config.profiles.find(p => p.id === k) || {}).groupId) || {}).name || k)));
+        return names.length === 1 ? `Weights: ${names[0]}` : `Weights: mixed — ${names.join(", ")} (averaged by miles; ~ marks blended weights)`;
+    }, [config, fleetSeries, focusIdx, tree]);
 
     return (
         <div className="fi-dash">
             <section className="fi-kpis">
-                <Kpi title={`${scopeName} score — ${focusText}`} value={fmtScore(fleet.current)} sub={`${scoreUnitLabel()} · vs the ${periodLabel(config)} before`}
+                <Kpi title={`${scopeName} score — ${focusText}`} value={fmtScore(fleet.current)} sub={`${scoreUnitLabel()} · vs ${prevText}`}
                      trend={<Trend delta={fleet.delta} goodWhen="up" />} badge={<BandPill band={bandFor(fleet.current, config)} />} />
                 <Kpi title="Median vehicle score" value={fmtScore(vehicleMedian)} sub={`${vehicleRows.filter(r => r.current != null).length.toLocaleString()} of ${vehicleRows.length.toLocaleString()} vehicles scored`}
                      trend={<Trend delta={vehicleMedian != null && prevVehicleMedian != null ? vehicleMedian - prevVehicleMedian : null} goodWhen="up" />} />
                 <Kpi title={`Events — ${focusText}`} value={fleet.currentEvents.toLocaleString()} sub={`${fmtRate(fleet.currentEvents / Math.max(1e-9, exposure(fleet.currentDistanceKm, config)) * 1000)} ${rateUnitLabel(config)}`}
                      trend={<Trend pct={pct(fleet.currentEvents, Object.values(fleetSeries.counts[focusIdx - 1] || {}).reduce((a, b) => a + b, 0))} goodWhen="down" />} />
-                <Kpi title={`Distance — ${focusText}`} value={fmtDistance(fleet.currentDistanceKm, config.unit)} sub={`scoring period: ${periodLabel(config)}`}
+                <Kpi title={`Distance — ${focusText}`} value={fmtDistance(fleet.currentDistanceKm, config.unit)} sub={rangeMode ? `${focus.days} day${focus.days === 1 ? "" : "s"}` : `scoring period: ${periodLabel(config)}`}
                      trend={<Trend pct={pct(fleet.currentDistanceKm, fleetSeries.distanceKm[focusIdx - 1])} goodWhen="up" />} />
             </section>
 
@@ -221,15 +259,19 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
                 <header className="fi-card-head">
                     <div>
                         <h3>Score trend</h3>
-                        <p className="fi-muted">Safety score out of 100 per {periodLabel(config)}, last {n} periods ({config.period === "week" ? `weeks start ${config.weekStart === 0 ? "Sunday" : "Monday"}` : config.period === "month" ? "calendar months" : "calendar days"}). The last bar is {curLabel.toLowerCase()} so far; completed periods don't change. Click a bar to focus the figures below on that period.</p>
+                        {rangeMode
+                            ? <p className="fi-muted">Custom date range: <strong>{periods[n - 1].label}</strong>{n > 1 ? <> compared with the {periods[0].days} days before it ({periods[0].label})</> : " (too long to compare with the period before)"}. Everything below — scores, tables and exports — is for this range.</p>
+                            : <p className="fi-muted">Safety score out of 100 per {periodLabel(config)}, last {n} periods ({config.period === "week" ? `weeks start ${config.weekStart === 0 ? "Sunday" : "Monday"}` : config.period === "month" ? "calendar months" : "calendar days"}). The last bar is {lastLabel.replace(" (to date)", "").toLowerCase()} so far; completed periods don't change. Click a bar to focus the figures below on that period.</p>}
                     </div>
                     <div className="fi-actions">
-                        {isCurrent
+                        {!rangeMode && (isCurrent
                             ? (n > 1 && <Button type="tertiary" onClick={() => setFocusIdx(n - 2)}>Show last full {periodLabel(config)}</Button>)
-                            : <Button type="tertiary" onClick={() => setFocusIdx(n - 1)}>Back to {curLabel.toLowerCase()} (to date)</Button>}
+                            : <Button type="tertiary" onClick={() => setFocusIdx(n - 1)}>Back to {lastLabel.toLowerCase()}</Button>)}
+                        {rangeMode && <Button type="tertiary" onClick={() => onSetRange(null)}>Back to {periodLabel(config)}ly trend</Button>}
+                        <RangePicker range={range} onApply={onSetRange} notify={notify} />
                     </div>
                 </header>
-                <BarTrend values={scoreSeries(fleetSeries, config)} labels={labels} unitLabel="/ 100" height={200} max={100} bands={config.bands} colorByBand currentLabel={`${curLabel} (to date)`}
+                <BarTrend values={scoreSeries(fleetSeries, config)} labels={labels} unitLabel="/ 100" height={200} max={100} bands={config.bands} colorByBand currentLabel={lastLabel}
                           onSelect={setFocusIdx} selected={focusIdx} />
             </section>
 
@@ -262,21 +304,26 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
                             </nav>
                         </div>
                         <div className="fi-actions">
-                            {homeId !== ROOT_GROUP_ID && (
+                            {(homeId !== ROOT_GROUP_ID || customGroups.length > 0) && (
                                 <select className="fi-input fi-input--inline fi-locpick" aria-label="Location"
-                                        value={unassignedOnly ? "__unassigned" : (refData.tree.childrenOf.get(homeId) || []).includes(nodeId) ? nodeId : nodeId === homeId ? "__all" : "__other"}
+                                        value={unassignedOnly ? "__unassigned" : nodeId === homeId ? "__all" : (homeChildren.includes(nodeId) || scope.custom) ? nodeId : "__other"}
                                         onChange={e => {
                                             const v = e.target.value;
                                             if (v === "__all") { setUnassignedOnly(false); setNodeId(homeId); }
                                             else if (v === "__unassigned") { setNodeId(homeId); setTab(tab === "groups" ? "vehicles" : tab); setTimeout(() => setUnassignedOnly(true), 0); }
-                                            else { setUnassignedOnly(false); setNodeId(v); }
+                                            else if (v === "__new") { onOpenSettings && onOpenSettings("custom"); }
+                                            else if (v !== "__other") { setUnassignedOnly(false); setNodeId(v); if (v.startsWith(CUSTOM_PREFIX) && tab === "groups" && resolveScope(v, tree, config, homeId).childIds.length < 2) setTab(lastIndividualTab); }
                                         }}>
-                                    <option value="__all">All {(refData.tree.byId.get(homeId) || {}).name || "locations"}</option>
-                                    {(refData.tree.childrenOf.get(homeId) || []).map(cid => (
-                                        <option key={cid} value={cid}>{(refData.tree.byId.get(cid) || {}).name || cid}</option>
+                                    <option value="__all">All {homeName}</option>
+                                    {homeId !== ROOT_GROUP_ID && homeChildren.map(cid => (
+                                        <option key={cid} value={cid}>{(tree.byId.get(cid) || {}).name || cid}</option>
                                     ))}
-                                    <option value="__unassigned">Unassigned vehicles</option>
-                                    {nodeId !== homeId && !(refData.tree.childrenOf.get(homeId) || []).includes(nodeId) && <option value="__other">{(refData.tree.byId.get(nodeId) || {}).name || nodeId}</option>}
+                                    {homeId !== ROOT_GROUP_ID && homeUnassigned > 0 && <option value="__unassigned">Unassigned vehicles</option>}
+                                    {nodeId !== homeId && !homeChildren.includes(nodeId) && !scope.custom && <option value="__other">{scope.name}</option>}
+                                    <optgroup label="Combined groups">
+                                        {customGroups.map(cg => <option key={cg.id} value={CUSTOM_PREFIX + cg.id}>{cg.name}</option>)}
+                                        <option value="__new">+ New combined group…</option>
+                                    </optgroup>
                                 </select>
                             )}
                             <div className="fi-tabs" role="tablist">
@@ -291,13 +338,20 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
                         <SortableTable columns={columns} rows={activeRows} defaultSort="current" defaultDir="asc" onRowClick={onRow}
                                        emptyText={tab === "groups" ? `${scopeName} has no sub-groups — use the Vehicles or Drivers tab for its individual scores.` : "Nothing in scope for this period."} />
                     </div>
+                    {homeId !== ROOT_GROUP_ID && nodeId === homeId && outsideCount > 0 && (
+                        <p className="fi-outside">
+                            {includeOutside
+                                ? <>Includes {outsideCount.toLocaleString()} vehicle{outsideCount === 1 ? "" : "s"} that are not in {homeName}, shown as “Unassigned vehicles”. <button className="fi-linkbtn fi-linkbtn--blue" onClick={() => onSetIncludeOutside && onSetIncludeOutside(false)}>Leave them out</button></>
+                                : <>{outsideCount.toLocaleString()} vehicle{outsideCount === 1 ? "" : "s"} outside {homeName} are not included in this report. <button className="fi-linkbtn fi-linkbtn--blue" onClick={() => onSetIncludeOutside && onSetIncludeOutside(true)}>Include them as “Unassigned”</button></>}
+                        </p>
+                    )}
                 </section>
 
                 <section className="fi-card">
                     <header className="fi-card-head">
                         <div>
                             <h3>Event performance <span className="fi-muted fi-h3sub">— {focusText}</span></h3>
-                            <p className="fi-muted">Bar = score points lost to this rule; counts vs the {periodLabel(config)} before.</p>
+                            <p className="fi-muted">Bar = score points lost to this rule; counts vs {prevText}.{weightsNote ? <> <span className="fi-weightsnote">{weightsNote}</span></> : null}</p>
                         </div>
                     </header>
                     <table className="fi-table fi-table--compact">
@@ -305,7 +359,7 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
                         <tbody>
                             {rules.map(r => (
                                 <tr key={r.id}>
-                                    <td>{r.name}<span className="fi-muted"> · {r.weight}%</span></td>
+                                    <td>{r.name}<span className="fi-muted"> · {r.mixed ? "~" : ""}{r.weight}%</span></td>
                                     <td><HBar value={r.impact} max={maxImpact} label={r.impact < 0.05 ? "0" : `−${fmtDelta(r.impact).replace("+", "")}`} tone={ruleTone(r.impact, maxImpact)} /></td>
                                     <td className="fi-right">{r.current.toLocaleString()}<span className="fi-muted"> / {r.previous.toLocaleString()}</span></td>
                                     <td className="fi-right" title={rateUnitLabel(config)}>{fmtRate(r.rate)}</td>
@@ -322,6 +376,58 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
                 <Detail kind={detail.kind} id={detail.id} config={config} periods={periods} data={data} refData={refData} initialPeriodIdx={focusIdx}
                         session={session} onClose={() => setDetail(null)} onDismiss={onDismiss} />
             )}
+        </div>
+    );
+}
+
+const MAX_RANGE_DAYS = 92;
+function ymd(d) {
+    const pad = v => String(v).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+function addDays(d, k) { const x = new Date(d); x.setDate(x.getDate() + k); return x; }
+
+/** Date-range selector. Nothing is fetched until a preset is chosen or Apply is pressed. */
+function RangePicker({ range, onApply, notify }) {
+    const today = new Date();
+    const [from, setFrom] = useState(range ? range.from : ymd(addDays(today, -6)));
+    const [to, setTo] = useState(range ? range.to : ymd(today));
+    useEffect(() => { if (range) { setFrom(range.from); setTo(range.to); } }, [range]);
+    const apply = (f, t) => {
+        const a = new Date(`${f}T00:00:00`), b = new Date(`${t}T00:00:00`);
+        if (!f || !t || Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) { notify && notify("Pick both a start and an end date.", "warn"); return; }
+        if (a > b) { notify && notify("The start date is after the end date.", "warn"); return; }
+        if (b > today) { notify && notify("The end date can't be in the future.", "warn"); return; }
+        const days = Math.round((b - a) / 86400000) + 1;
+        if (days > MAX_RANGE_DAYS) { notify && notify(`Ranges are limited to ${MAX_RANGE_DAYS} days — pick a shorter range.`, "warn"); return; }
+        onApply({ from: f, to: t });
+    };
+    const preset = key => {
+        let a, b = today;
+        if (key === "7") a = addDays(today, -6);
+        else if (key === "14") a = addDays(today, -13);
+        else if (key === "30") a = addDays(today, -29);
+        else if (key === "month") a = new Date(today.getFullYear(), today.getMonth(), 1);
+        else if (key === "lastmonth") { a = new Date(today.getFullYear(), today.getMonth() - 1, 1); b = new Date(today.getFullYear(), today.getMonth(), 0); }
+        else return;
+        setFrom(ymd(a)); setTo(ymd(b));
+        apply(ymd(a), ymd(b));
+    };
+    return (
+        <div className={`fi-range ${range ? "fi-range--on" : ""}`}>
+            <span className="fi-muted">Date range</span>
+            <select className="fi-input fi-input--inline" value="" onChange={e => preset(e.target.value)} aria-label="Quick date range">
+                <option value="">Quick pick…</option>
+                <option value="7">Last 7 days</option>
+                <option value="14">Last 14 days</option>
+                <option value="30">Last 30 days</option>
+                <option value="month">This month</option>
+                <option value="lastmonth">Last month</option>
+            </select>
+            <input className="fi-input fi-input--inline" type="date" value={from} max={ymd(today)} onChange={e => setFrom(e.target.value)} aria-label="From date" />
+            <span className="fi-muted">to</span>
+            <input className="fi-input fi-input--inline" type="date" value={to} max={ymd(today)} onChange={e => setTo(e.target.value)} aria-label="To date" />
+            <Button type="secondary" onClick={() => apply(from, to)}>Apply</Button>
         </div>
     );
 }

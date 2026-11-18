@@ -159,6 +159,17 @@ export async function exportScorecardExcel(opts) {
     ms.addRow(["Rule", "Weight %", `Events ${config.unit === "km" ? "per 1,000 km" : "per 1,000 mi"} that scores 0`]).font = { bold: true, color: { argb: "FFFFFFFF" } };
     ms.getRow(1).eachCell(c => { c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF" + NAVY } }; });
     for (const r of config.rules) ms.addRow([r.name, r.weight, r.maxRate]);
+    for (const prof of config.profiles || []) {
+        ms.addRow([]);
+        const hr = ms.addRow([`Weights for ${(opts.profileNames || {})[prof.id] || prof.groupId}`, "Weight %", "Scores 0 at"]);
+        hr.font = { bold: true, color: { argb: "FFFFFFFF" } };
+        hr.eachCell(c => { c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF" + BLUE } }; });
+        for (const r of prof.rules) ms.addRow([r.name, r.weight, r.maxRate]);
+    }
+    if ((config.profiles || []).length) {
+        ms.addRow([]);
+        ms.addRow(["Vehicles in a group listed above are scored with that group's weights; everything else uses the first table. Totals that mix groups are averaged by distance driven."]);
+    }
     ms.addRow([]);
     ms.addRow(["Formula"]).font = { bold: true, color: { argb: "FF" + BLUE } };
     ms.addRow([`rate(rule) = events ÷ distance × 1,000`]);
@@ -225,7 +236,7 @@ export function exportScorecardPdf(opts) {
 <div class="note">${esc(lines[2])} <span class="noprint">If the rows print without colour, turn on "Background graphics" in the print dialog's More settings.</span></div>
 ${tableHtml(table)}
 <div class="legend"><span><i class="sw" style="background:#f4cccc"></i>High risk (&lt; ${config.bands.medium})</span><span><i class="sw" style="background:#fce5cd"></i>Medium (${config.bands.medium}–${config.bands.low - 1})</span><span><i class="sw" style="background:#fff"></i>Low (≥ ${config.bands.low})</span><span><i class="sw" style="background:#eee"></i>Not scored (low exposure)</span></div>
-<div class="model"><b>Scoring model:</b> ${config.rules.map(r => `${esc(r.name)} ${r.weight}% (0 at ${r.maxRate}/1,000 ${config.unit === "km" ? "km" : "mi"})`).join(" · ")}. score = Σ 100 × max(0, 1 − rate ÷ maxRate) × weight.</div>
+<div class="model"><b>Scoring model:</b> ${config.rules.map(r => `${esc(r.name)} ${r.weight}% (0 at ${r.maxRate}/1,000 ${config.unit === "km" ? "km" : "mi"})`).join(" · ")}. score = Σ 100 × max(0, 1 − rate ÷ maxRate) × weight.${(config.profiles || []).length ? ` <b>Group-specific weights</b> apply to: ${config.profiles.map(p => esc((opts.profileNames || {})[p.id] || p.groupId)).join(", ")} — the weights above are the default.` : ""}</div>
 ${sectionHtml}
 <script>window.addEventListener("load", function () { setTimeout(function () { window.print(); }, 150); });</script>
 </body></html>`;

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import {
+    profileKeyFor, configForProfile, scoreAt, profilesAt,
+    resolveScope, inScope, devicesInScope, shouldIncludeOutside, buildRangePeriods, focusLabel, lastBarLabel,
     displayGroupLabel, isSystemGroupId,
     buildPeriods, bucketIndex, normalizeConfig, normalizeWeights, scoreFor, subScoreFor, rateFor, bandFor, trendPct, median,
     aggregate, sumSeries, summarize, ruleBreakdown, buildGroupTree, groupRollup, devicesUnder, breadcrumb, scorableDevices
@@ -262,6 +264,149 @@ test("display group as the home node: children + unassigned vehicles across the 
     const rows = groupRollup({ nodeId: "gLoc", tree, devices: scope, byDevice, config, nPeriods: periods.length });
     assert.deepEqual(rows.map(r => [r.name, r.vehicles]), [["Southern California Division", 1], ["Northern California division", 1], ["Unassigned vehicles", 1]]);
     assert.deepEqual(rows[2].deviceIds, ["d4"]);
+});
+
+test("scopes: a sub-group as the report anchor only contains its own vehicles; combined groups include/exclude", () => {
+    const groups = [
+        { id: "GroupCompanyId", name: "Company", children: [{ id: "gLoc" }] },
+        { id: "gLoc", name: "Locations", children: [{ id: "gSoCal" }, { id: "gNorCal" }] },
+        { id: "gSoCal", name: "Southern California Division", children: [{ id: "gCivil" }, { id: "gElectric" }, { id: "gFleet" }] },
+        { id: "gCivil", name: "ILB Civil Underground", children: [] },
+        { id: "gElectric", name: "ILB Electric", children: [] },
+        { id: "gFleet", name: "ILB Fleet", children: [] },
+        { id: "gNorCal", name: "Northern California division", children: [] }
+    ];
+    const tree = buildGroupTree(groups);
+    const devs = [
+        { id: "c1", groups: [{ id: "gCivil" }] },
+        { id: "e1", groups: [{ id: "gElectric" }] },
+        { id: "f1", groups: [{ id: "gFleet" }] },
+        { id: "ce", groups: [{ id: "gCivil" }, { id: "gElectric" }] },   // in both → excluded when Electric is excluded
+        { id: "s0", groups: [{ id: "gSoCal" }] },                         // directly in the division
+        { id: "n1", groups: [{ id: "gNorCal" }] },
+        { id: "x1", groups: [{ id: "GroupCompanyId" }] }
+    ];
+    const cfg = normalizeConfig({ version: 2, displayGroupId: "gSoCal", customGroups: [
+        { id: "a", name: "Civil + Fleet", include: ["gCivil", "gFleet"] },
+        { id: "b", name: "SoCal without Electric", include: ["gSoCal"], exclude: ["gElectric"] },
+        { id: "bad", name: "", include: ["gCivil"] }, { id: "empty", name: "Nothing", include: [] }
+    ] });
+    assert.deepEqual(cfg.customGroups.map(g => g.id), ["a", "b"]);
+
+    // the bug: SoCal as the anchor must not pull in NorCal / company vehicles
+    const home = resolveScope("gSoCal", tree, cfg, "gSoCal");
+    assert.deepEqual(devicesInScope(home, devs).map(d => d.id), ["c1", "e1", "f1", "ce", "s0"]);
+    assert.equal(home.wholeFleet, false);
+    assert.equal(resolveScope("GroupCompanyId", tree, cfg, "gSoCal").wholeFleet, true);
+
+    const a = resolveScope("custom:a", tree, cfg, "gSoCal");
+    assert.deepEqual(devicesInScope(a, devs).map(d => d.id), ["c1", "f1", "ce"]);
+    assert.deepEqual(a.childIds, ["gCivil", "gFleet"]);
+    assert.deepEqual(a.crumbs.map(c => c.name), ["Company", "Locations", "Southern California Division", "Civil + Fleet"]);
+
+    const b = resolveScope("custom:b", tree, cfg, "gSoCal");
+    assert.deepEqual(devicesInScope(b, devs).map(d => d.id), ["c1", "f1", "s0"]);     // e1 and ce dropped
+    assert.deepEqual(b.childIds, ["gCivil", "gFleet"]);                                // children of SoCal minus Electric
+    assert.equal(inScope([{ id: "gFleet" }], b), true);
+    assert.equal(inScope([{ id: "gFleet" }, { id: "gElectric" }], b), false);
+
+    // unknown / deleted combined group falls back to the home scope
+    assert.equal(resolveScope("custom:gone", tree, cfg, "gSoCal").id, "gSoCal");
+
+    // outside rule: auto = only when the anchor covers ≥ 75% of the fleet
+    assert.equal(shouldIncludeOutside(cfg, 60, 909), true);     // Locations at ILB
+    assert.equal(shouldIncludeOutside(cfg, 580, 909), false);   // one division
+    assert.equal(shouldIncludeOutside(cfg, 0, 909), false);
+    assert.equal(shouldIncludeOutside({ includeOutside: true }, 580, 909), true);
+    assert.equal(shouldIncludeOutside({ includeOutside: false }, 60, 909), false);
+});
+
+test("date-range periods: selected range plus the equal-length range before it", () => {
+    const p = buildRangePeriods(new Date(2026, 9, 1), new Date(2026, 9, 31), true);
+    assert.equal(p.length, 2);
+    assert.equal(p[1].days, 31);
+    assert.equal(new Date(p[1].start).getDate(), 1);
+    assert.equal(new Date(p[1].end).getDate(), 31);
+    assert.equal(p[0].end, p[1].start - 1);
+    assert.equal(new Date(p[0].start).getMonth(), 7);   // Aug 31
+    assert.equal(new Date(p[0].start).getDate(), 31);
+    assert.ok(p.every(x => x.custom && !x.partial));
+    assert.equal(bucketIndex(p, new Date(2026, 9, 15).getTime()), 1);
+    assert.equal(bucketIndex(p, new Date(2026, 8, 15).getTime()), 0);
+    assert.equal(buildRangePeriods(new Date(2026, 9, 1), new Date(2026, 9, 31), false).length, 1);
+    assert.equal(buildRangePeriods(new Date(2026, 9, 5), new Date(2026, 9, 1)).length, 0);
+    const cfgW = normalizeConfig({ version: 2 });
+    assert.equal(focusLabel(p, 1, cfgW), p[1].label);
+    assert.equal(lastBarLabel(p, cfgW), p[1].label);
+    const wk = buildPeriods(new Date(2026, 9, 19, 12), "week", 3, 1);
+    assert.equal(focusLabel(wk, 2, cfgW), "this week to date");
+    assert.match(focusLabel(wk, 1, cfgW), /^week of /);
+    assert.equal(lastBarLabel(wk, cfgW), "This week (to date)");
+});
+
+test("weight profiles: a division scores with its own weights; mixed totals are distance-weighted", () => {
+    const groups = [
+        { id: "GroupCompanyId", name: "Company", children: [{ id: "gLoc" }] },
+        { id: "gLoc", name: "Locations", children: [{ id: "gNor" }, { id: "gSo" }] },
+        { id: "gNor", name: "Northern California division", children: [{ id: "gNorYard" }] },
+        { id: "gNorYard", name: "NorCal Yard", children: [] },
+        { id: "gSo", name: "Southern California Division", children: [] }
+    ];
+    const tree = buildGroupTree(groups);
+    const base = { version: 2, period: "week", periods: 2, unit: "miles", minDistance: 10, rules: [
+        { id: "brake", name: "Harsh Braking", weight: 50, maxRate: 40 },
+        { id: "phone", name: "Cell phone use", weight: 50, maxRate: 5 }
+    ] };
+    // North: harsh braking matters much less (mountain roads) and is more forgiving
+    const cfg = normalizeConfig({ ...base, profiles: [
+        { id: "north", groupId: "gNor", rules: [{ id: "brake", weight: 10, maxRate: 80 }, { id: "phone", weight: 90 }] },
+        { id: "dup", groupId: "gNor", rules: [] },          // duplicate group → dropped
+        { id: "bad", rules: [] }                             // no group → dropped
+    ] });
+    assert.deepEqual(cfg.profiles.map(p => p.id), ["north"]);
+    assert.deepEqual(cfg.profiles[0].rules.map(r => [r.id, r.weight, r.maxRate]), [["brake", 10, 80], ["phone", 90, 5]]);   // phone inherits maxRate 5
+    // a profile that doesn't total 100 is normalized; a rule missing from it inherits the default
+    const fix = normalizeConfig({ ...base, profiles: [{ id: "x", groupId: "gSo", rules: [{ id: "brake", weight: 30 }] }] });
+    assert.equal(fix.profiles[0].rules.reduce((a, r) => a + r.weight, 0), 100);
+
+    assert.equal(profileKeyFor([{ id: "gNorYard" }], cfg, tree), "north");     // sub-group of the profile's group
+    assert.equal(profileKeyFor([{ id: "gSo" }], cfg, tree), "default");
+    assert.equal(configForProfile(cfg, "default"), cfg);
+    assert.equal(configForProfile(cfg, "north").rules[0].weight, 10);
+
+    const P = buildPeriods(new Date(2026, 9, 15), "week", 2, 1);
+    const at = new Date(P[1].start + 3600000).toISOString();
+    const profileOf = new Map([["n1", "north"], ["s1", "default"]]);
+    // identical driving: 20 harsh brakes over 1,000 mi (rate 20/1,000)
+    const exceptions = [];
+    for (const dev of ["n1", "s1"]) for (let k = 0; k < 20; k++) exceptions.push({ activeFrom: at, device: { id: dev }, driver: { id: "u-" + dev }, rule: { id: "brake" } });
+    const trips = [
+        { start: at, device: { id: "n1" }, driver: { id: "u-n1" }, distance: mi(1000) },
+        { start: at, device: { id: "s1" }, driver: { id: "u-s1" }, distance: mi(1000) }
+    ];
+    const agg = aggregate({ periods: P, config: cfg, exceptions, trips, deviceIds: new Set(["n1", "s1"]), profileOf });
+    const north = scoreAt(agg.byDevice.get("n1"), 1, cfg);   // brake sub = 100×(1−20/80)=75 → 75×.10 + 100×.90 = 97.5
+    const south = scoreAt(agg.byDevice.get("s1"), 1, cfg);   // brake sub = 100×(1−20/40)=50 → 50×.50 + 100×.50 = 75
+    assert.ok(Math.abs(north - 97.5) < 1e-9, "north " + north);
+    assert.ok(Math.abs(south - 75) < 1e-9, "south " + south);
+    assert.ok(Math.abs(scoreAt(agg.byDriver.get("u-n1"), 1, cfg) - 97.5) < 1e-9);   // drivers follow the truck's profile
+    // total of both = distance-weighted average of the parts
+    const both = sumSeries([agg.byDevice.get("n1"), agg.byDevice.get("s1")], 2);
+    assert.ok(Math.abs(scoreAt(both, 1, cfg) - (97.5 + 75) / 2) < 1e-9);
+    assert.deepEqual(profilesAt(both, 1).sort(), ["default", "north"]);
+    // impacts still add up to 100 − score, and the mixed weight is the distance-weighted average
+    const br = ruleBreakdown(both, cfg, 1);
+    assert.ok(Math.abs(br.reduce((a, r) => a + r.impact, 0) - (100 - 86.25)) < 1e-9);
+    assert.equal(br.find(r => r.id === "brake").weight, 30);
+    assert.equal(br.find(r => r.id === "brake").mixed, true);
+    const brN = ruleBreakdown(agg.byDevice.get("n1"), cfg, 1);
+    assert.equal(brN.find(r => r.id === "brake").weight, 10);
+    assert.equal(brN.find(r => r.id === "brake").maxRate, 80);
+    assert.equal(brN.find(r => r.id === "brake").mixed, false);
+    // no profiles configured → identical to the plain score
+    const plain = normalizeConfig(base);
+    const agg2 = aggregate({ periods: P, config: plain, exceptions, trips, deviceIds: new Set(["n1", "s1"]) });
+    assert.equal(scoreAt(agg2.byDevice.get("n1"), 1, plain), scoreFor({ brake: 20 }, mi(1000), plain));
 });
 
 console.log(`\n${passed} tests passed`);

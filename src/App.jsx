@@ -3,7 +3,7 @@ import { Button } from "@geotab/zenith/dist/button/button";
 import { Banner } from "@geotab/zenith/dist/banner/banner";
 import { Waiting } from "@geotab/zenith/dist/waiting/waiting";
 import { EmptyState } from "@geotab/zenith/dist/emptyState/emptyState";
-import { buildPeriods, aggregate, buildGroupTree, scorableDevices, ROOT_GROUP_ID, normalizeConfig } from "./model.js";
+import { buildPeriods, buildRangePeriods, aggregate, buildGroupTree, scorableDevices, profileKeyFor, ROOT_GROUP_ID, normalizeConfig } from "./model.js";
 import { loadReferenceData, loadExceptions, loadTrips, loadConfig, saveConfig, loadHidden, saveHidden, dismissException, friendlyError } from "./api.js";
 import { Dashboard, periodLabel } from "./components/Dashboard.jsx";
 import { Settings } from "./components/Settings.jsx";
@@ -17,6 +17,7 @@ export default function App({ api, groupFilter, focusNonce }) {
     const [raw, setRaw] = useState(null);          // { exceptions, trips }
     const [view, setView] = useState("dashboard");
     const [nodeId, setNodeId] = useState(null);
+    const [tab, setTab] = useState("groups");   // lives here so it survives a date-range reload
     const [loading, setLoading] = useState(false);
     const [progress, setProgress] = useState("");
     const [error, setError] = useState(null);
@@ -24,7 +25,12 @@ export default function App({ api, groupFilter, focusNonce }) {
     const [saveInfo, setSaveInfo] = useState(null);
     const [asOf, setAsOf] = useState(null);
     const [toast, setToast] = useState(null);
+    // Custom date range ({from, to} as YYYY-MM-DD) — a view choice, not saved. null = the regular trend.
+    const [range, setRange] = useState(null);
+    const [settingsSection, setSettingsSection] = useState(null);
     const runId = useRef(0);
+    // Fetched data per window, so switching between the trend and a date range (or back) is instant.
+    const cache = useRef(new Map());
 
     const notify = useCallback((text, tone = "info") => {
         setToast({ text, tone });
@@ -91,11 +97,27 @@ export default function App({ api, groupFilter, focusNonce }) {
 
     /* ---- events + trips ---- */
     // Calendar-aligned: completed weeks/months never shift; only the last ("to date") period grows.
-    const periods = useMemo(() => effConfig ? buildPeriods(new Date(), effConfig.period, effConfig.periods, effConfig.weekStart) : [], [effConfig]);
+    const periods = useMemo(() => {
+        if (!effConfig) return [];
+        if (range) {
+            const from = new Date(`${range.from}T00:00:00`), to = new Date(`${range.to}T00:00:00`);
+            const days = Math.round((to - from) / 86400000) + 1;
+            // Comparing with the period before doubles the fetch — only do it for ranges up to a month.
+            const p = buildRangePeriods(from, to, days <= 31);
+            if (p.length) return p;
+        }
+        return buildPeriods(new Date(), effConfig.period, effConfig.periods, effConfig.weekStart);
+    }, [effConfig, range]);
 
-    const refresh = useCallback(async () => {
+    const configKey = effConfig ? JSON.stringify([effConfig.rules.map(r => r.id), periods.length ? periods[0].start : 0, periods.length ? periods[periods.length - 1].end : 0, groupKey]) : "";
+
+    const refresh = useCallback(async (force = false) => {
         if (!config || !refData || !config.rules.length || !periods.length) return;
         const myRun = ++runId.current;
+        const key = configKey;
+        const cached = !force && cache.current.get(key);
+        const hit = cached && Date.now() - cached.asOf.getTime() < 15 * 60 * 1000 ? cached : null;   // reuse for 15 minutes
+        if (hit) { setRaw({ key, exceptions: hit.exceptions, trips: hit.trips }); setAsOf(hit.asOf); setLoading(false); setProgress(""); return; }
         setLoading(true);
         setError(null);
         try {
@@ -106,27 +128,34 @@ export default function App({ api, groupFilter, focusNonce }) {
                 loadTrips(api, { from, to, groupFilter, deviceCount: refData.devices.length, onProgress })
             ]);
             if (runId.current !== myRun) return;
-            setRaw({ exceptions, trips });
-            setAsOf(new Date());
+            const now = new Date();
+            cache.current.set(key, { exceptions, trips, asOf: now });
+            while (cache.current.size > 4) cache.current.delete(cache.current.keys().next().value);
+            setRaw({ key, exceptions, trips });
+            setAsOf(now);
         } catch (e) {
             if (runId.current === myRun) setError(friendlyError(e));
         } finally {
             if (runId.current === myRun) { setLoading(false); setProgress(""); }
         }
-    }, [api, config, refData, periods, groupFilter]);
+    }, [api, config, refData, periods, groupFilter, configKey]);
 
-    const configKey = effConfig ? JSON.stringify([effConfig.rules.map(r => r.id), effConfig.period, effConfig.periods, periods.length ? periods[0].start : 0, periods.length ? periods[periods.length - 1].end : 0]) : "";
     useEffect(() => { refresh(); }, [configKey, refData]); // eslint-disable-line react-hooks/exhaustive-deps
 
     /* ---- derived: aggregate (cheap; re-runs when weights, hidden list or raw data change) ---- */
     const data = useMemo(() => {
-        if (!raw || !scopedRef || !effConfig) return null;
+        // Only use data that was fetched for the window currently on screen.
+        if (!raw || raw.key !== configKey || !scopedRef || !effConfig) return null;
         const hiddenIds = new Set(hidden.ids.map(h => h.id));
         const exceptions = hiddenIds.size ? raw.exceptions.filter(e => !hiddenIds.has(e.id)) : raw.exceptions;
         const deviceIds = new Set(scopedRef.devices.map(d => d.id));
-        const agg = aggregate({ periods, config: effConfig, exceptions, trips: raw.trips, deviceIds });
+        // Which weight profile each vehicle is scored with (its division's, when one is set up).
+        const profileOf = (effConfig.profiles || []).length
+            ? new Map(scopedRef.devices.map(d => [d.id, profileKeyFor(d.groups, effConfig, scopedRef.tree)]))
+            : null;
+        const agg = aggregate({ periods, config: effConfig, exceptions, trips: raw.trips, deviceIds, profileOf });
         return { ...agg, exceptions, trips: raw.trips };
-    }, [raw, scopedRef, effConfig, periods, hidden]);
+    }, [raw, configKey, scopedRef, effConfig, periods, hidden]);
 
     /* ---- dismiss ---- */
     const onDismiss = useCallback(async event => {
@@ -134,6 +163,7 @@ export default function App({ api, groupFilter, focusNonce }) {
             const r = await dismissException(api, event);
             if (r.mode === "api") {
                 setRaw(prev => prev ? { ...prev, exceptions: prev.exceptions.filter(e => e.id !== event.id) } : prev);
+                for (const entry of cache.current.values()) entry.exceptions = entry.exceptions.filter(e => e.id !== event.id);
                 notify("Event dismissed in MyGeotab and removed from the score.");
             } else {
                 const next = { ...hidden, ids: [{ id: event.id, at: Date.now() }, ...hidden.ids.filter(h => h.id !== event.id)] };
@@ -155,7 +185,7 @@ export default function App({ api, groupFilter, focusNonce }) {
     /* ---- quick change of the display group from the dashboard (saved like any setting) ---- */
     const onSetDisplayGroup = useCallback(async id => {
         if (!config || !session) return;
-        const clean = normalizeConfig({ ...config, displayGroupId: id || null });
+        const clean = normalizeConfig({ ...config, displayGroupId: id || null, includeOutside: null });
         setConfig(clean);
         setNodeId(null);
         const r = await saveConfig(api, session.database, clean, configMeta.recordId);
@@ -163,6 +193,17 @@ export default function App({ api, groupFilter, focusNonce }) {
         const name = id && refData && refData.tree.byId.get(id) ? refData.tree.byId.get(id).name : null;
         notify(name ? `Reporting by ${name} — saved for this database.` : "Reporting by all groups.");
     }, [api, config, session, configMeta.recordId, refData, notify]);
+
+    const onSetIncludeOutside = useCallback(async value => {
+        if (!config || !session) return;
+        const clean = normalizeConfig({ ...config, includeOutside: value });
+        setConfig(clean);
+        setNodeId(null);
+        const r = await saveConfig(api, session.database, clean, configMeta.recordId);
+        setConfigMeta(m => ({ ...m, recordId: r.recordId, source: r.persisted }));
+    }, [api, config, session, configMeta.recordId]);
+
+    const openSettings = useCallback(section => { setSaveInfo(null); setSettingsSection(section || null); setView("settings"); }, []);
 
     /* ---- settings save ---- */
     const onSave = async clean => {
@@ -195,16 +236,18 @@ export default function App({ api, groupFilter, focusNonce }) {
                 <div>
                     <h2 className="fi-title">Fleet Insights <span className="fi-byline">by GPSFMS</span></h2>
                     <div className="fi-sub">
-                        {effConfig && <span>{effConfig.periods} × {periodLabel(effConfig)} · {rangeText}</span>}
+                        {effConfig && (range && periods.length && periods[periods.length - 1].custom
+                            ? <span>Custom date range · {periods[periods.length - 1].label}</span>
+                            : <span>{effConfig.periods} × {periodLabel(effConfig)} · {rangeText}</span>)}
                         {asOf && <span className="fi-muted"> · updated {asOf.toLocaleTimeString()}</span>}
                         {configMeta.source === "browser" && <span className="fi-muted"> · settings saved in this browser only</span>}
                         {hidden.ids.length > 0 && <span className="fi-muted"> · {hidden.ids.length} event{hidden.ids.length === 1 ? "" : "s"} hidden locally</span>}
                     </div>
                 </div>
                 <div className="fi-actions">
-                    {view === "dashboard" && <Button type="secondary" onClick={refresh} disabled={loading || !config || !config.rules.length}>Refresh</Button>}
+                    {view === "dashboard" && <Button type="secondary" onClick={() => refresh(true)} disabled={loading || !config || !config.rules.length}>Refresh</Button>}
                     {view === "dashboard"
-                        ? <Button type="primary" onClick={() => { setSaveInfo(null); setView("settings"); }} disabled={!config || !refData}>Settings</Button>
+                        ? <Button type="primary" onClick={() => openSettings(null)} disabled={!config || !refData}>Settings</Button>
                         : null}
                 </div>
             </header>
@@ -218,7 +261,7 @@ export default function App({ api, groupFilter, focusNonce }) {
 
             {config && refData && view === "settings" && (
                 <Settings config={config} rules={refData.rules} devices={refData.devices} groups={refData.groups} tree={refData.tree}
-                          onSave={onSave} saving={saving} saveInfo={saveInfo}
+                          onSave={onSave} saving={saving} saveInfo={saveInfo} focusSection={settingsSection}
                           hiddenCount={hidden.ids.length} onClearHidden={onClearHidden}
                           onCancel={() => { if (config.rules.length) setView("dashboard"); }} />
             )}
@@ -226,12 +269,14 @@ export default function App({ api, groupFilter, focusNonce }) {
             {config && scopedRef && view === "dashboard" && (
                 config.rules.length === 0
                     ? <EmptyState description="No rules are being tracked yet. Open Settings to choose the exception rules and their weights." />
-                    : loading && !data
-                        ? <Waiting isLoading description={progress || "Loading events and trips…"} />
+                    : !data
+                        ? (error ? null : <Waiting isLoading description={progress || "Loading events and trips…"} />)
                         : data
                             ? <>
                                 {loading && <div className="fi-progress">{progress || "Refreshing…"}</div>}
                                 <Dashboard config={effConfig} periods={periods} refData={scopedRef} data={data} onSetDisplayGroup={onSetDisplayGroup}
+                                           range={range} onSetRange={setRange} onOpenSettings={openSettings} onSetIncludeOutside={onSetIncludeOutside}
+                                           tab={tab} setTab={setTab}
                                            nodeId={nodeId} setNodeId={setNodeId} session={session} onDismiss={onDismiss} notify={notify} />
                               </>
                             : null

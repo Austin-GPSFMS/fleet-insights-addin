@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@geotab/zenith/dist/button/button";
-import { summarize, scoreSeries, ruleBreakdown, fmtScore, fmtDelta, fmtDistance, fmtRate, rateUnitLabel, currentPeriodLabel } from "../model.js";
+import { summarize, scoreSeries, ruleBreakdown, fmtScore, fmtDelta, fmtDistance, fmtRate, rateUnitLabel, currentPeriodLabel, lastBarLabel } from "../model.js";
 import { driverLabel } from "../api.js";
 import { BarTrend, HBar, Trend, BandPill } from "./Charts.jsx";
 
@@ -43,6 +43,10 @@ export function Detail({ kind, id, config, periods, data, refData, session, onCl
     const maxImpact = Math.max(0, ...rules.map(r => r.impact));
     const p = periods[periodIdx];
     const periodCounts = series.counts[periodIdx] || {};
+    // Weekly/monthly periods read "this week to date" / "period starting Oct 12"; a custom date range reads as its dates.
+    const custom = !!p.custom;
+    const periodText = custom ? p.label : isCurrent ? `${curLabel.toLowerCase()} to date` : `period starting ${p.label}`;
+    const shortText = custom ? p.label : isCurrent ? `${curLabel.toLowerCase()} to date` : p.label;
 
     const dismiss = async e => {
         setBusyId(e.id);
@@ -66,19 +70,19 @@ export function Detail({ kind, id, config, periods, data, refData, session, onCl
                 </header>
 
                 <section className="fi-kpis fi-kpis--3">
-                    <Mini title={isCurrent ? `Score — ${curLabel.toLowerCase()} to date` : `Score — period starting ${p.label}`} value={fmtScore(sum.current)} sub="out of 100 · change vs the period before" badge={<BandPill band={sum.band} />} trend={<Trend delta={sum.delta} goodWhen="up" />} />
-                    <Mini title={isCurrent ? `Events — ${curLabel.toLowerCase()} to date` : `Events — ${p.label}`} value={sum.currentEvents.toLocaleString()} sub={`${fmtRate(sum.currentDistanceKm > 0 ? sum.currentEvents / exposure(sum.currentDistanceKm, config) * 1000 : null)} ${rateUnitLabel(config)}`} />
-                    <Mini title={isCurrent ? `Distance — ${curLabel.toLowerCase()} to date` : `Distance — ${p.label}`} value={fmtDistance(sum.currentDistanceKm, config.unit)} sub={`${fmtDistance(sum.totalDistanceKm, config.unit)} over ${n} periods`} />
+                    <Mini title={`Score — ${periodText}`} value={fmtScore(sum.current)} sub="out of 100 · change vs the period before" badge={<BandPill band={sum.band} />} trend={<Trend delta={sum.delta} goodWhen="up" />} />
+                    <Mini title={`Events — ${shortText}`} value={sum.currentEvents.toLocaleString()} sub={`${fmtRate(sum.currentDistanceKm > 0 ? sum.currentEvents / exposure(sum.currentDistanceKm, config) * 1000 : null)} ${rateUnitLabel(config)}`} />
+                    <Mini title={`Distance — ${shortText}`} value={fmtDistance(sum.currentDistanceKm, config.unit)} sub={`${fmtDistance(sum.totalDistanceKm, config.unit)} over ${n} periods`} />
                 </section>
 
                 <section className="fi-card fi-card--flat">
                     <h4>Score by period <span className="fi-muted">— click a bar to switch the figures and events below to that period{!isCurrent && <> · </>}</span>{!isCurrent && <button className="fi-crumb fi-crumb--reset" onClick={() => setPeriodIdx(n - 1)}>Back to current</button>}</h4>
                     <BarTrend values={scoreSeries(series, config)} labels={periods.map(x => x.label)} unitLabel="/ 100"
-                              height={150} width={760} max={100} bands={config.bands} colorByBand onSelect={setPeriodIdx} selected={periodIdx} currentLabel={`${curLabel} (to date)`} />
+                              height={150} width={760} max={100} bands={config.bands} colorByBand onSelect={setPeriodIdx} selected={periodIdx} currentLabel={lastBarLabel(periods, config)} />
                 </section>
 
                 <section className="fi-card fi-card--flat">
-                    <h4>Rule mix <span className="fi-muted">— {isCurrent ? `${curLabel.toLowerCase()} to date` : `period starting ${p.label}`}, score points lost per rule; counts vs the period before</span></h4>
+                    <h4>Rule mix <span className="fi-muted">— {periodText}, score points lost per rule; counts vs the period before</span></h4>
                     <table className="fi-table fi-table--compact">
                         <tbody>
                             {rules.map(r => (
@@ -95,7 +99,7 @@ export function Detail({ kind, id, config, periods, data, refData, session, onCl
                 </section>
 
                 <section className="fi-card fi-card--flat">
-                    <h4>Events — {isCurrent ? `${curLabel.toLowerCase()} to date` : `period starting ${p.label}`} <span className="fi-muted">({events.length})</span></h4>
+                    <h4>Events — {periodText} <span className="fi-muted">({events.length})</span></h4>
                     <div className="fi-chips">
                         {Object.entries(periodCounts).map(([rid, c]) => (
                             <span key={rid} className="fi-chip">{(ruleNames.get(rid) || {}).name || rid}: {c}</span>

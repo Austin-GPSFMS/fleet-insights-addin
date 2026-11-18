@@ -25,7 +25,16 @@ export const DEFAULT_CONFIG = Object.freeze({
     excludedDeviceTypes: ["None", "GoAnywhere", "GoAnywhereLite", "Gemini", "CustomDevice", "GoDriveDevice", "OldGeotab"],
     excludedGroups: [],        // group ids whose whole subtree is left out of scoring
     weekStart: 1,              // 0 = Sunday, 1 = Monday — first day of the scoring week
-    displayGroupId: null       // parent group whose children label each driver/vehicle (e.g. "Locations"); null = show all groups
+    displayGroupId: null,      // parent group whose children label each driver/vehicle (e.g. "Locations"); null = show all groups
+    // Named combinations of groups, e.g. { id, name: "Civil + Fleet", include: [groupIds], exclude: [groupIds] }.
+    // A vehicle is in a combined group when it is under any `include` group and under no `exclude` group.
+    customGroups: [],
+    // Weight profiles per group: [{ id, groupId, rules: [{ id, weight, maxRate }] }]. A vehicle under
+    // `groupId` (first match wins) is scored with that profile's weights instead of the default ones.
+    profiles: [],
+    // Vehicles outside the Report-by group: null = auto (shown as "Unassigned" only when the group
+    // covers at least 75% of the fleet), true = always show as Unassigned, false = always leave out.
+    includeOutside: null
 });
 
 /** Geotab system groups have fixed ids like GroupCompanyId / GroupVehicleId / GroupAssetTypeId. */
@@ -175,6 +184,28 @@ export function normalizeConfig(raw) {
     c.excludedGroups = Array.isArray(c.excludedGroups) ? c.excludedGroups.map(String) : [];
     c.weekStart = Number(c.weekStart) === 0 ? 0 : 1;
     c.displayGroupId = c.displayGroupId ? String(c.displayGroupId) : null;
+    c.customGroups = Array.isArray(c.customGroups)
+        ? c.customGroups.filter(g => g && String(g.name || "").trim() && Array.isArray(g.include) && g.include.length).map((g, i) => ({
+            id: String(g.id || `cg${i + 1}`),
+            name: String(g.name).trim(),
+            include: [...new Set(g.include.map(String))],
+            exclude: [...new Set((Array.isArray(g.exclude) ? g.exclude : []).map(String))]
+        }))
+        : [];
+    c.includeOutside = c.includeOutside === true ? true : c.includeOutside === false ? false : null;
+    // Profiles always carry exactly the tracked rules; missing entries inherit the default weight.
+    const seenProfileGroups = new Set();
+    c.profiles = Array.isArray(c.profiles)
+        ? c.profiles.filter(p => p && p.groupId && !seenProfileGroups.has(String(p.groupId)) && seenProfileGroups.add(String(p.groupId))).map((p, i) => {
+            const own = new Map((Array.isArray(p.rules) ? p.rules : []).filter(r => r && r.id).map(r => [String(r.id), r]));
+            let rules = c.rules.map(r => {
+                const o = own.get(r.id) || {};
+                return { id: r.id, name: r.name, weight: num(o.weight, r.weight), maxRate: Math.max(0.01, num(o.maxRate, r.maxRate)) };
+            });
+            if (rules.length && Math.abs(weightTotal(rules) - 100) > 0.001) rules = normalizeWeights(rules);
+            return { id: String(p.id || `p${i + 1}`), groupId: String(p.groupId), rules };
+        })
+        : [];
     c.version = 2;
     delete c.normalization;
     return c;
@@ -233,6 +264,44 @@ export function shortDate(d) {
     return dt.toLocaleDateString(undefined, { month: "short", day: "2-digit" });
 }
 
+/**
+ * Periods for an explicit date range (local days, inclusive): the selected range and, when
+ * `withPrevious`, the equal-length range right before it (for the Change column).
+ * Each period is flagged `custom` so labels read as dates rather than "week of".
+ */
+export function buildRangePeriods(from, to, withPrevious = true) {
+    const start = new Date(from); start.setHours(0, 0, 0, 0);
+    const end = new Date(to); end.setHours(23, 59, 59, 999);
+    if (!(start.getTime() <= end.getTime())) return [];
+    const days = Math.round((end.getTime() + 1 - start.getTime()) / DAY_MS);
+    const label = (a, b) => (sameDay(a, b) ? fullDate(a) : `${fullDate(a)} – ${fullDate(b)}`);
+    const sel = { start: start.getTime(), end: end.getTime(), label: label(start, end), partial: false, custom: true, days };
+    if (!withPrevious) return [sel];
+    const pEnd = new Date(start.getTime() - 1);
+    const pStart = new Date(start); pStart.setDate(pStart.getDate() - days); pStart.setHours(0, 0, 0, 0);
+    return [{ start: pStart.getTime(), end: pEnd.getTime(), label: label(pStart, pEnd), partial: false, custom: true, days }, sel];
+}
+function sameDay(a, b) { return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate(); }
+function fullDate(d) {
+    const opts = { month: "short", day: "numeric" };
+    if (d.getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
+    return d.toLocaleDateString(undefined, opts);
+}
+
+/** Text for "which period am I looking at": "this week to date", "week of Oct 12", or a date range. */
+export function focusLabel(periods, idx, config) {
+    const p = periods[idx];
+    if (!p) return "";
+    if (p.custom) return p.label;
+    if (idx === periods.length - 1 && p.partial) return `${currentPeriodLabel(config.period).toLowerCase()} to date`;
+    return `${config.period === "day" ? "day" : config.period === "month" ? "month" : "week"} of ${p.label}`;
+}
+/** Axis label for the last bar. */
+export function lastBarLabel(periods, config) {
+    const p = periods[periods.length - 1];
+    return p && p.custom ? p.label : `${currentPeriodLabel(config.period)} (to date)`;
+}
+
 /** "This week (to date)" style label for the partial current period. */
 export function currentPeriodLabel(period) {
     return period === "day" ? "Today" : period === "month" ? "This month" : "This week";
@@ -249,6 +318,42 @@ export function bucketIndex(periods, t) {
         else return mid;
     }
     return -1;
+}
+
+/* ------------------------------ weight profiles ------------------------------ */
+
+export const DEFAULT_PROFILE = "default";
+
+const profileCfgCache = new WeakMap();
+/** The config to score with for a profile key (same settings, that profile's rule weights). */
+export function configForProfile(config, key) {
+    if (!key || key === DEFAULT_PROFILE || !(config.profiles || []).length) return config;
+    let m = profileCfgCache.get(config);
+    if (!m) { m = new Map(); profileCfgCache.set(config, m); }
+    if (!m.has(key)) {
+        const p = config.profiles.find(x => x.id === key);
+        m.set(key, p ? { ...config, rules: p.rules, profiles: [] } : config);
+    }
+    return m.get(key);
+}
+
+/** Which profile a vehicle is scored with: the first profile whose group contains it. */
+export function profileKeyFor(groupRefs, config, tree) {
+    for (const p of config.profiles || []) {
+        const sub = tree && tree.byId.has(p.groupId) ? tree.descendants(p.groupId) : new Set([p.groupId]);
+        if ((groupRefs || []).some(g => sub.has(typeof g === "string" ? g : g && g.id))) return p.id;
+    }
+    return DEFAULT_PROFILE;
+}
+
+/** Parts of a series (per weight profile) that have distance in period i: [{ key, counts, km }]. */
+function partsAt(series, i) {
+    const out = [];
+    for (const [key, part] of Object.entries(series.parts || {})) {
+        const km = part.distanceKm[i] || 0;
+        if (km > 0) out.push({ key, counts: part.counts[i] || {}, km });
+    }
+    return out;
 }
 
 /* ------------------------------ scoring ------------------------------ */
@@ -279,6 +384,11 @@ export function subScoreFor(count, distanceKm, rule, config) {
 export function scoreFor(counts, distanceKm, config) {
     if (!config.rules.length) return null;
     if (exposureOf(distanceKm, config) < Math.max(config.minDistance, 1e-9)) return null;
+    return weightedScore(counts, distanceKm, config);
+}
+
+/** Σ subScore × weight for one set of weights — no minimum-distance check. */
+function weightedScore(counts, distanceKm, config) {
     let total = 0;
     for (const r of config.rules) {
         const sub = subScoreFor(counts[r.id] || 0, distanceKm, r, config);
@@ -326,18 +436,31 @@ export function toDisplayDistance(km, unit) {
 
 /* ------------------------------ aggregation ------------------------------ */
 
+function emptyPart(nPeriods) {
+    return { counts: Array.from({ length: nPeriods }, () => ({})), distanceKm: new Array(nPeriods).fill(0) };
+}
 function emptySeries(nPeriods) {
     return {
         counts: Array.from({ length: nPeriods }, () => ({})),
         distanceKm: new Array(nPeriods).fill(0),
         engineHours: new Array(nPeriods).fill(0),
-        events: 0
+        events: 0,
+        parts: {}     // per weight profile: { [profileKey]: { counts[], distanceKm[] } }
     };
 }
+function partOf(series, key) {
+    return series.parts[key] || (series.parts[key] = emptyPart(series.counts.length));
+}
 
-function addCount(series, idx, ruleId) {
+function addCount(series, idx, ruleId, key = DEFAULT_PROFILE) {
     series.counts[idx][ruleId] = (series.counts[idx][ruleId] || 0) + 1;
+    const part = partOf(series, key);
+    part.counts[idx][ruleId] = (part.counts[idx][ruleId] || 0) + 1;
     series.events++;
+}
+function addDistance(series, idx, km, key = DEFAULT_PROFILE) {
+    series.distanceKm[idx] += km;
+    partOf(series, key).distanceKm[idx] += km;
 }
 
 /**
@@ -349,8 +472,11 @@ function addCount(series, idx, ruleId) {
  * @param trips       [{ start: ISO|ms, device: {id}, driver?: {id}, distance: km }]
  * @param deviceIds   Set of device ids in scope (others are ignored)
  * @param engineHours optional [{ device:{id}, periodIndex, hours }]
+ * @param profileOf   optional Map deviceId → weight-profile key (events and miles are filed under
+ *                    the profile of the vehicle they happened on, for vehicles and drivers alike)
  */
-export function aggregate({ periods, config, exceptions, trips, deviceIds, engineHours = [] }) {
+export function aggregate({ periods, config, exceptions, trips, deviceIds, engineHours = [], profileOf }) {
+    const keyOf = devId => (profileOf && profileOf.get(devId)) || DEFAULT_PROFILE;
     const n = periods.length;
     const ruleIds = new Set(config.rules.map(r => r.id));
     const byDevice = new Map();
@@ -368,9 +494,9 @@ export function aggregate({ periods, config, exceptions, trips, deviceIds, engin
         if (deviceIds && !deviceIds.has(devId)) continue;
         const idx = bucketIndex(periods, toMs(e.activeFrom));
         if (idx < 0) continue;
-        addCount(get(byDevice, devId), idx, ruleId);
+        addCount(get(byDevice, devId), idx, ruleId, keyOf(devId));
         const drvId = e.driver && e.driver.id;
-        if (drvId && drvId !== "UnknownDriverId" && drvId !== "NoDriverId") addCount(get(byDriver, drvId), idx, ruleId);
+        if (drvId && drvId !== "UnknownDriverId" && drvId !== "NoDriverId") addCount(get(byDriver, drvId), idx, ruleId, keyOf(devId));
     }
 
     for (const t of trips) {
@@ -379,9 +505,9 @@ export function aggregate({ periods, config, exceptions, trips, deviceIds, engin
         const idx = bucketIndex(periods, toMs(t.start));
         if (idx < 0) continue;
         const km = Number(t.distance) || 0;
-        get(byDevice, devId).distanceKm[idx] += km;
+        addDistance(get(byDevice, devId), idx, km, keyOf(devId));
         const drvId = t.driver && t.driver.id;
-        if (drvId && drvId !== "UnknownDriverId" && drvId !== "NoDriverId") get(byDriver, drvId).distanceKm[idx] += km;
+        if (drvId && drvId !== "UnknownDriverId" && drvId !== "NoDriverId") addDistance(get(byDriver, drvId), idx, km, keyOf(devId));
     }
 
     for (const eh of engineHours) {
@@ -409,14 +535,43 @@ export function sumSeries(seriesList, nPeriods) {
             out.engineHours[i] += s.engineHours[i];
             for (const [ruleId, c] of Object.entries(s.counts[i])) out.counts[i][ruleId] = (out.counts[i][ruleId] || 0) + c;
         }
+        for (const [key, part] of Object.entries(s.parts || {})) {
+            const op = partOf(out, key);
+            for (let i = 0; i < nPeriods; i++) {
+                op.distanceKm[i] += part.distanceKm[i];
+                for (const [ruleId, c] of Object.entries(part.counts[i])) op.counts[i][ruleId] = (op.counts[i][ruleId] || 0) + c;
+            }
+        }
         out.events += s.events;
     }
     return out;
 }
 
+/**
+ * Score of a series in period i. With weight profiles, each profile's share of the series is
+ * scored with its own weights and the results are averaged by distance driven — so a division
+ * row uses that division's weights and a mixed total stays consistent with its parts.
+ */
+export function scoreAt(series, i, config) {
+    const counts = series.counts[i] || {}, km = series.distanceKm[i] || 0;
+    if (!(config.profiles || []).length || !series.parts) return scoreFor(counts, km, config);
+    if (!config.rules.length) return null;
+    if (exposureOf(km, config) < Math.max(config.minDistance, 1e-9)) return null;
+    const parts = partsAt(series, i);
+    if (!parts.length) return scoreFor(counts, km, config);
+    let acc = 0, dist = 0;
+    for (const p of parts) { acc += p.km * weightedScore(p.counts, p.km, configForProfile(config, p.key)); dist += p.km; }
+    return Math.min(100, Math.max(0, acc / dist));
+}
+
 /** Per-period scores for a series. */
 export function scoreSeries(series, config) {
-    return series.counts.map((counts, i) => scoreFor(counts, series.distanceKm[i], config, series.engineHours[i]));
+    return series.counts.map((_, i) => scoreAt(series, i, config));
+}
+
+/** Profile keys that contribute distance to a series in period i (for "which weights apply" labels). */
+export function profilesAt(series, i) {
+    return partsAt(series, i).map(p => p.key);
 }
 
 /** Row summary for tables: score at period `idx` (default: latest), previous, trend, band, totals. */
@@ -451,17 +606,35 @@ export function ruleBreakdown(series, config, idx) {
     const prev = i > 0 ? series.counts[i - 1] || {} : {};
     const curKm = series.distanceKm[i] || 0;
     const prevKm = i > 0 ? series.distanceKm[i - 1] || 0 : 0;
+    // With weight profiles, each profile's share contributes its own weight and sub-score,
+    // averaged by distance — so the impacts still add up to (100 − score).
+    const parts = (config.profiles || []).length && series.parts ? partsAt(series, i) : [];
+    const partKm = parts.reduce((a, p) => a + p.km, 0);
+    const mixed = new Set(parts.map(p => p.key)).size > 1;
     return config.rules.map(r => {
         const c = cur[r.id] || 0, p = prev[r.id] || 0;
-        const sub = subScoreFor(c, curKm, r, config);
+        let weight = r.weight, maxRate = r.maxRate, sub = subScoreFor(c, curKm, r, config), impact = sub == null ? 0 : (100 - sub) * (r.weight / 100);
+        if (parts.length) {
+            let w = 0, imp = 0;
+            for (const part of parts) {
+                const pr = configForProfile(config, part.key).rules.find(x => x.id === r.id) || r;
+                const ps = subScoreFor(part.counts[r.id] || 0, part.km, pr, config);
+                w += (part.km / partKm) * pr.weight;
+                imp += (part.km / partKm) * (ps == null ? 0 : (100 - ps) * (pr.weight / 100));
+                if (!mixed) maxRate = pr.maxRate;
+            }
+            weight = Math.round(w * 10) / 10;
+            impact = imp;
+            sub = w > 0 ? Math.max(0, 100 - (imp * 100) / w) : sub;
+        }
         return {
-            id: r.id, name: r.name, weight: r.weight, maxRate: r.maxRate,
+            id: r.id, name: r.name, weight, maxRate, mixed,
             current: c, previous: p, trend: trendPct(c, p),
             rate: rateFor(c, curKm, config), previousRate: rateFor(p, prevKm, config),
             subScore: sub,
             // points lost from the 100 ceiling because of this rule (what the bar shows)
-            impact: sub == null ? 0 : (100 - sub) * (r.weight / 100),
-            currentPoints: c * r.weight,
+            impact,
+            currentPoints: c * weight,
             perPeriod: series.counts.map(cc => cc[r.id] || 0),
             total: series.counts.reduce((a, cc) => a + (cc[r.id] || 0), 0)
         };
@@ -508,9 +681,9 @@ export const ROOT_GROUP_ID = "GroupCompanyId";
  * Roll device series up to the children of `nodeId`. Devices that belong to the
  * node directly (not via any child subtree) appear under a synthetic "Direct" row.
  */
-export function groupRollup({ nodeId, tree, devices, byDevice, config, nPeriods, idx }) {
+export function groupRollup({ nodeId, tree, devices, byDevice, config, nPeriods, idx, childIds: childIdsIn }) {
     const node = tree.byId.get(nodeId);
-    const childIds = tree.childrenOf.get(nodeId) || [];
+    const childIds = childIdsIn || tree.childrenOf.get(nodeId) || [];
     const rows = [];
     const assigned = new Set();
     for (const cid of childIds) {
@@ -544,6 +717,78 @@ export function devicesUnder(nodeId, tree, devices, wholeFleetIds = []) {
     if (nodeId === ROOT_GROUP_ID || wholeFleetIds.includes(nodeId)) return devices;
     const subtree = tree.descendants(nodeId);
     return devices.filter(d => (d.groups || []).some(g => subtree.has(g.id)));
+}
+
+/* ------------------------------ scopes ------------------------------ */
+
+export const CUSTOM_PREFIX = "custom:";
+
+function unionDescendants(ids, tree) {
+    const out = new Set();
+    for (const id of ids || []) {
+        if (tree.byId.has(id)) for (const x of tree.descendants(id)) out.add(x);
+        else out.add(id);
+    }
+    return out;
+}
+
+/**
+ * Turn a node id — a real group id or "custom:<id>" for a combined group — into a scope:
+ *   { id, name, custom, wholeFleet, include:Set, exclude:Set, childIds:[], crumbs:[{id,name}] }
+ * A vehicle/driver is in scope when one of its groups is in `include` and none is in `exclude`
+ * (`wholeFleet` scopes match everything). Unknown ids fall back to `homeId`.
+ */
+export function resolveScope(nodeId, tree, config, homeId = ROOT_GROUP_ID) {
+    const id = String(nodeId || homeId);
+    if (id.startsWith(CUSTOM_PREFIX)) {
+        const cg = (config.customGroups || []).find(g => CUSTOM_PREFIX + g.id === id);
+        if (cg) {
+            const inc = cg.include.filter(g => tree.byId.has(g));
+            const exclude = unionDescendants(cg.exclude, tree);
+            // One included parent → compare its children (minus excluded ones); several → compare them.
+            const childIds = (inc.length === 1 ? (tree.childrenOf.get(inc[0]) || []) : inc).filter(c => !exclude.has(c));
+            return {
+                id, name: cg.name, custom: true, wholeFleet: false,
+                include: unionDescendants(inc, tree), exclude, childIds,
+                crumbs: [...breadcrumb(homeId, tree), { id, name: cg.name }]
+            };
+        }
+        return resolveScope(homeId, tree, config, homeId);
+    }
+    if (!tree.byId.has(id)) return id === homeId ? resolveScope(ROOT_GROUP_ID, tree, config, ROOT_GROUP_ID) : resolveScope(homeId, tree, config, homeId);
+    return {
+        id, name: tree.byId.get(id).name, custom: false, wholeFleet: id === ROOT_GROUP_ID,
+        include: tree.descendants(id), exclude: new Set(), childIds: tree.childrenOf.get(id) || [],
+        crumbs: breadcrumb(id, tree)
+    };
+}
+
+/** Does a subject with these group memberships fall in the scope? */
+export function inScope(groupRefs, scope) {
+    if (scope.wholeFleet) return true;
+    let hit = false;
+    for (const g of groupRefs || []) {
+        const id = typeof g === "string" ? g : g && g.id;
+        if (scope.exclude.has(id)) return false;
+        if (scope.include.has(id)) hit = true;
+    }
+    return hit;
+}
+
+export function devicesInScope(scope, devices) {
+    return scope.wholeFleet ? devices : devices.filter(d => inScope(d.groups, scope));
+}
+
+/**
+ * Should vehicles outside the Report-by group be reported (as "Unassigned") at the home node?
+ * Explicit setting wins; otherwise only when the group covers at least 75% of the fleet — i.e. it
+ * is meant to hold everyone (Locations) rather than being one slice (a single division).
+ */
+export function shouldIncludeOutside(config, outsideCount, totalCount) {
+    if (!outsideCount) return false;
+    if (config.includeOutside === true) return true;
+    if (config.includeOutside === false) return false;
+    return totalCount > 0 && outsideCount <= totalCount * 0.25;
 }
 
 export function breadcrumb(nodeId, tree) {

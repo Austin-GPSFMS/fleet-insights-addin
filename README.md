@@ -9,7 +9,7 @@ time — by group, drilled down to individual vehicles and drivers.
 session. No proxy, no server, no data leaves Geotab. Settings are stored in the database as
 `AddInData` so every user sees the same score definition.
 
-## What it does (v0.4)
+## What it does (v0.7)
 
 - **Score trend** — safety score **out of 100** per **calendar** period (weeks starting Monday or
   Sunday, calendar months, or days), last N periods, higher is better, band lines for Low / Medium
@@ -55,6 +55,27 @@ session. No proxy, no server, no data leaves Geotab. Settings are stored in the 
   they drove; drivers with no location follow the vehicles they drove in the period. Drivers use
   their own user group membership first, then their current vehicle's groups. Anyone outside that
   family shows their other (non-system) groups instead.
+- **Scope follows the Report-by group.** Anchoring on one division (e.g. *Southern California
+  Division*) reports only that division's vehicles and drivers. Vehicles outside the anchor are shown
+  as "Unassigned vehicles" only when the anchor covers at least 75% of the fleet (e.g. *Locations*);
+  a line under the table says how many are outside and lets you include or leave them out
+  (Settings → "Vehicles outside that group": Automatic / Always include / Always leave out).
+- **Combined groups** (Settings → Combined groups, or "+ New combined group…" in the location
+  picker) — a named set of groups reported as one: include several groups ("Civil + Fleet"), or
+  include a parent and exclude a child ("Southern California without ILB Electric"). A vehicle or
+  driver counts when it is in any included group and in none of the excluded ones. Combined groups
+  appear in the location picker, as tagged rows in the Groups table, and get their own export sheet.
+- **Date range** — next to "Show last full week": quick picks (last 7 / 14 / 30 days, this month,
+  last month) or From / To + Apply. Nothing is fetched until a pick or Apply; the range is compared
+  with the equal-length period before it (ranges over 31 days are shown without a comparison; the
+  limit is 92 days). KPIs, tables, the drawer and exports all switch to the range; "Back to weekly
+  trend" returns instantly (fetched windows are cached for 15 minutes; Refresh forces a reload).
+- **Weights by division** (Settings → Tracked rules → "Weights for") — give a group its own rule
+  weights and sensitivities (e.g. harsh braking counts for less in Northern California). Vehicles in
+  that group and its sub-groups are scored with those weights; everything else uses the default.
+  Each set must total 100%. Events and miles are filed under the weights of the vehicle they happened
+  on (drivers included); totals that mix divisions are the distance-weighted average of their parts,
+  and the rule list marks blended weights with "~". The export's Scoring model sheet lists every set.
 - **Assets to score** (Settings) — device types present in the database with counts; untracked
   assets (`None`), GO Anywhere battery trackers (`GoAnywhere`, `GoAnywhereLite`, `Gemini`),
   third-party and GoDrive-only devices are excluded by default. Whole groups (with sub-groups) can be
