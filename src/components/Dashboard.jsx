@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@geotab/zenith/dist/button/button";
 import {
     sumSeries, summarize, scoreSeries, ruleBreakdown, groupRollup, median,
-    resolveScope, inScope, devicesInScope, shouldIncludeOutside, focusLabel, lastBarLabel, CUSTOM_PREFIX, profilesAt, DEFAULT_PROFILE,
+    resolveScope, inScope, devicesInScope, shouldIncludeOutside, focusLabel, lastBarLabel, CUSTOM_PREFIX, profilesAt, DEFAULT_PROFILE, profileGroupName,
     fmtScore, fmtDelta, fmtDistance, fmtRate, rateUnitLabel, scoreUnitLabel, bandFor, displayGroupLabel, ROOT_GROUP_ID
 } from "../model.js";
 import { driverLabel } from "../api.js";
@@ -215,7 +215,7 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
     };
     const exportOpts = () => ({
         rows: activeRows, config, kind: tab, database: session ? session.database : "", periodIdx: focusIdx, sections: exportSections(),
-        profileNames: Object.fromEntries((config.profiles || []).map(p => [p.id, (tree.byId.get(p.groupId) || {}).name || p.groupId])),
+        profileNames: Object.fromEntries((config.profiles || []).map(p => [p.id, profileGroupName(p.groupId, config, tree)])),
         scopeName, rangeText,
         subjectLabel: tab === "groups" ? "Group" : tab === "vehicles" ? "Vehicle" : "Driver",
         groupLabel: tab === "groups" ? null : "Group",
@@ -238,7 +238,7 @@ export function Dashboard({ config, periods, refData, data, nodeId: nodeIdProp, 
         if (!(config.profiles || []).length) return null;
         const keys = profilesAt(fleetSeries, focusIdx);
         if (!keys.length) return null;
-        const names = keys.map(k => (k === DEFAULT_PROFILE ? "default" : ((tree.byId.get((config.profiles.find(p => p.id === k) || {}).groupId) || {}).name || k)));
+        const names = keys.map(k => (k === DEFAULT_PROFILE ? "default" : profileGroupName((config.profiles.find(p => p.id === k) || {}).groupId || k, config, tree)));
         return names.length === 1 ? `Weights: ${names[0]}` : `Weights: mixed — ${names.join(", ")} (averaged by miles; ~ marks blended weights)`;
     }, [config, fleetSeries, focusIdx, tree]);
 

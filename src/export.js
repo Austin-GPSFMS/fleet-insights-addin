@@ -156,15 +156,17 @@ export async function exportScorecardExcel(opts) {
 
     // Scoring model sheet — the transparency GoAnalytics doesn't offer.
     const ms = wb.addWorksheet(sheetName("Scoring model"));
-    ms.addRow(["Rule", "Weight %", `Events ${config.unit === "km" ? "per 1,000 km" : "per 1,000 mi"} that scores 0`]).font = { bold: true, color: { argb: "FFFFFFFF" } };
+    const vol = config.scoreMode === "volume";
+    const zeroAt = r => (vol ? config.volumeZeroAt : r.maxRate);
+    ms.addRow(["Rule", "Weight %", `Events ${config.unit === "km" ? "per 1,000 km" : "per 1,000 mi"} ${vol ? "that cost the whole weight" : "that scores 0"}`]).font = { bold: true, color: { argb: "FFFFFFFF" } };
     ms.getRow(1).eachCell(c => { c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF" + NAVY } }; });
-    for (const r of config.rules) ms.addRow([r.name, r.weight, r.maxRate]);
+    for (const r of config.rules) ms.addRow([r.name, r.weight, zeroAt(r)]);
     for (const prof of config.profiles || []) {
         ms.addRow([]);
         const hr = ms.addRow([`Weights for ${(opts.profileNames || {})[prof.id] || prof.groupId}`, "Weight %", "Scores 0 at"]);
         hr.font = { bold: true, color: { argb: "FFFFFFFF" } };
         hr.eachCell(c => { c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF" + BLUE } }; });
-        for (const r of prof.rules) ms.addRow([r.name, r.weight, r.maxRate]);
+        for (const r of prof.rules) ms.addRow([r.name, r.weight, zeroAt(r)]);
     }
     if ((config.profiles || []).length) {
         ms.addRow([]);
@@ -173,8 +175,14 @@ export async function exportScorecardExcel(opts) {
     ms.addRow([]);
     ms.addRow(["Formula"]).font = { bold: true, color: { argb: "FF" + BLUE } };
     ms.addRow([`rate(rule) = events ÷ distance × 1,000`]);
-    ms.addRow([`subScore(rule) = 100 × max(0, 1 − rate ÷ maxRate)`]);
-    ms.addRow([`score = Σ subScore(rule) × weight(rule) ÷ 100`]);
+    if (vol) {
+        ms.addRow([`points lost = Σ weight(rule) × rate(rule) ÷ ${config.volumeZeroAt}`]);
+        ms.addRow([`score = max(0, 100 − points lost)`]);
+        ms.addRow(["Volume-based scoring: one sensitivity for every rule and no ceiling per rule — every event keeps costing points until the score reaches 0."]);
+    } else {
+        ms.addRow([`subScore(rule) = 100 × max(0, 1 − rate ÷ maxRate)`]);
+        ms.addRow([`score = Σ subScore(rule) × weight(rule) ÷ 100`]);
+    }
     ms.addRow([`Period: calendar ${config.period}${config.period === "week" ? ` starting ${config.weekStart === 0 ? "Sunday" : "Monday"}` : ""}; bands Low ≥ ${config.bands.low}, Medium ≥ ${config.bands.medium}; minimum exposure ${config.minDistance} ${config.unit}`]);
     ms.getColumn(1).width = 44; ms.getColumn(2).width = 12; ms.getColumn(3).width = 36;
 
@@ -236,7 +244,9 @@ export function exportScorecardPdf(opts) {
 <div class="note">${esc(lines[2])} <span class="noprint">If the rows print without colour, turn on "Background graphics" in the print dialog's More settings.</span></div>
 ${tableHtml(table)}
 <div class="legend"><span><i class="sw" style="background:#f4cccc"></i>High risk (&lt; ${config.bands.medium})</span><span><i class="sw" style="background:#fce5cd"></i>Medium (${config.bands.medium}–${config.bands.low - 1})</span><span><i class="sw" style="background:#fff"></i>Low (≥ ${config.bands.low})</span><span><i class="sw" style="background:#eee"></i>Not scored (low exposure)</span></div>
-<div class="model"><b>Scoring model:</b> ${config.rules.map(r => `${esc(r.name)} ${r.weight}% (0 at ${r.maxRate}/1,000 ${config.unit === "km" ? "km" : "mi"})`).join(" · ")}. score = Σ 100 × max(0, 1 − rate ÷ maxRate) × weight.${(config.profiles || []).length ? ` <b>Group-specific weights</b> apply to: ${config.profiles.map(p => esc((opts.profileNames || {})[p.id] || p.groupId)).join(", ")} — the weights above are the default.` : ""}</div>
+<div class="model"><b>Scoring model:</b> ${config.scoreMode === "volume"
+    ? `${config.rules.map(r => `${esc(r.name)} ${r.weight}%`).join(" · ")}. Volume-based: score = max(0, 100 − Σ weight × rate ÷ ${config.volumeZeroAt}), rate = events per 1,000 ${config.unit === "km" ? "km" : "mi"}; no ceiling per rule.`
+    : `${config.rules.map(r => `${esc(r.name)} ${r.weight}% (0 at ${r.maxRate}/1,000 ${config.unit === "km" ? "km" : "mi"})`).join(" · ")}. score = Σ 100 × max(0, 1 − rate ÷ maxRate) × weight.`}${(config.profiles || []).length ? ` <b>Group-specific weights</b> apply to: ${config.profiles.map(p => esc((opts.profileNames || {})[p.id] || p.groupId)).join(", ")} — the weights above are the default.` : ""}</div>
 ${sectionHtml}
 <script>window.addEventListener("load", function () { setTimeout(function () { window.print(); }, 150); });</script>
 </body></html>`;

@@ -191,3 +191,5 @@ g:hover > .fi-bar { fill: var(--fi-navy); }
 .fi-profilebar select { max-width: 280px; }
 .fi-profilehint { margin: 0 0 8px; }
 .fi-weightsnote { color: var(--fi-navy); font-weight: 500; }
+
+.fi-sevhint { margin: 8px 0 0; }

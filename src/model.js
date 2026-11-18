@@ -34,7 +34,14 @@ export const DEFAULT_CONFIG = Object.freeze({
     profiles: [],
     // Vehicles outside the Report-by group: null = auto (shown as "Unassigned" only when the group
     // covers at least 75% of the fleet), true = always show as Unassigned, false = always leave out.
-    includeOutside: null
+    includeOutside: null,
+    // How events turn into the score.
+    //   "capped": each rule has its own sensitivity (maxRate) and can cost at most its weight.
+    //   "volume": one sensitivity for every rule (volumeZeroAt) and no ceiling per rule — every
+    //             event keeps costing points until the score reaches 0, so a high volume of one
+    //             kind of event is not hidden. This is how GoAnalytics ranks.
+    scoreMode: "capped",
+    volumeZeroAt: 25           // volume mode: events per 1,000 (mi|km) at which a rule has cost its whole weight
 });
 
 /** Geotab system groups have fixed ids like GroupCompanyId / GroupVehicleId / GroupAssetTypeId. */
@@ -138,6 +145,96 @@ export function suggestRelativeWeight(name) {
     return 2;
 }
 
+/* ---- suggested weights: three levels by rule name, each rule's weight is its share of 100 ---- */
+
+export const SEVERITIES = ["high", "medium", "mild"];
+export const SEVERITY_LABELS = { high: "High", medium: "Medium", mild: "Mild" };
+/**
+ * How much one event of each level counts relative to a Mild one. Estimated from a GoAnalytics
+ * scorecard (ILB SoCal, 103 drivers, 7 days): High ≈ 1.8 × Mild (80% range 1.5–2.3), Medium not
+ * distinguishable from Mild (0.6–1.1, biased low because speeding goes with highway miles). The
+ * scorecard has no distance column, so these are estimates, not GoAnalytics' published values.
+ */
+export const SEVERITY_FACTORS = { high: 2, medium: 1.5, mild: 1 };
+
+export function severityOf(v) {
+    const k = String(v || "").toLowerCase();
+    return SEVERITY_FACTORS[k] ? k : null;
+}
+
+/** Level suggestion from the rule name (the levels GoAnalytics shows in its Score Breakdown). */
+export function suggestSeverity(name) {
+    const n = String(name || "");
+    if (/collision|crash|accident|impact/i.test(n)) return "high";
+    if (/seat ?belt/i.test(n)) return "mild";
+    if (/harsh|hard (brak|corner|accel)|acceleration|cornering|braking|idl/i.test(n)) return "mild";
+    if (/phone|cell|handheld|mobile|distract|drows|fatigue|yawn|following|tailgat|headway/i.test(n)) return "high";
+    if (/speed/i.test(n)) {
+        const over = /\+\s?(\d{1,3})/.exec(n);
+        if ((over && Number(over[1]) >= 15) || /egregious|agregious|excessive|severe|extreme|reckless/i.test(n)) return "high";
+        return "medium";
+    }
+    if (/lens|obstruct|camera cover|tamper|smok|vap|stop sign|rolling stop|lane/i.test(n)) return "medium";
+    return "mild";
+}
+
+/** One-click weights for a rule list: levels from the rule names, weights totalling exactly 100. */
+export function suggestWeights(rules) {
+    return weightsFromSeverity(rules.map(r => ({ ...r, severity: suggestSeverity(r.name) }))).map(r => { const { severity, ...rest } = r; void severity; return rest; });
+}
+
+/**
+ * Weights from levels. Rules with a level share whatever the rules without one leave of 100,
+ * in proportion to their level's factor; whole numbers, exact total. Returns a new list.
+ */
+export function weightsFromSeverity(rules) {
+    const tiered = rules.filter(r => severityOf(r.severity));
+    if (!tiered.length) return rules;
+    const manual = rules.reduce((a, r) => a + (severityOf(r.severity) ? 0 : Math.max(0, num(r.weight, 0))), 0);
+    const pool = Math.max(0, 100 - manual);
+    const fsum = tiered.reduce((a, r) => a + SEVERITY_FACTORS[severityOf(r.severity)], 0);
+    const exactOf = k => (pool * SEVERITY_FACTORS[k]) / fsum;
+    // First choice: one whole-number weight per tier (rules of the same tier always match),
+    // as close to the exact shares as whole numbers allow, totalling exactly the pool.
+    const tiers = SEVERITIES.filter(k => tiered.some(r => severityOf(r.severity) === k))
+        .map(k => ({ k, n: tiered.filter(r => severityOf(r.severity) === k).length, e: exactOf(k) }));
+    const perTier = Number.isInteger(pool) ? bestTierWeights(tiers, pool) : null;
+    if (perTier) return rules.map(r => (severityOf(r.severity) ? { ...r, severity: severityOf(r.severity), weight: perTier[severityOf(r.severity)] } : r));
+    // Otherwise (e.g. three High rules sharing 100): whole numbers, remainder to the largest fractions.
+    const exact = new Map(tiered.map(r => [r.id, exactOf(severityOf(r.severity))]));
+    const out = rules.map(r => (exact.has(r.id) ? { ...r, severity: severityOf(r.severity), weight: Math.floor(exact.get(r.id) + 1e-9) } : r));
+    let rem = pool - out.reduce((a, r) => a + (exact.has(r.id) ? r.weight : 0), 0);
+    const order = out.map((r, i) => i).filter(i => exact.has(out[i].id)).sort((a, b) => {
+        const fa = exact.get(out[a].id) - out[a].weight, fb = exact.get(out[b].id) - out[b].weight;
+        return Math.abs(fb - fa) > 1e-9 ? fb - fa : SEVERITY_FACTORS[out[b].severity] - SEVERITY_FACTORS[out[a].severity] || a - b;
+    });
+    for (let k = 0; rem >= 1 - 1e-9 && order.length; k = (k + 1) % order.length) { out[order[k]].weight += 1; rem -= 1; }
+    if (rem > 1e-9 && order.length) out[order[0]].weight = Math.round((out[order[0]].weight + rem) * 10) / 10;
+    return out;
+}
+
+/** Whole-number weight per tier ({high, medium, mild}) closest to the exact shares, or null. */
+function bestTierWeights(tiers, pool) {
+    if (!tiers.length) return null;
+    const [top, ...rest] = tiers;   // highest tier present takes whatever the others leave
+    let best = null, bestCost = Infinity;
+    const range = t => { const lo = Math.max(0, Math.floor(t.e) - 3), out = []; for (let v = lo; v <= Math.ceil(t.e) + 3; v++) out.push(v); return out; };
+    const walk = (idx, picked, used) => {
+        if (idx === rest.length) {
+            const w = (pool - used) / top.n;
+            if (w < 0 || !Number.isInteger(w)) return;
+            const all = [w, ...picked];
+            for (let i = 1; i < all.length; i++) if (all[i] > all[i - 1]) return;   // a lower tier never outweighs a higher one
+            const cost = tiers.reduce((a, t, i) => a + t.n * (all[i] - t.e) ** 2, 0);
+            if (cost < bestCost - 1e-9) { bestCost = cost; best = Object.fromEntries(tiers.map((t, i) => [t.k, all[i]])); }
+            return;
+        }
+        for (const v of range(rest[idx])) walk(idx + 1, [...picked, v], used + v * rest[idx].n);
+    };
+    walk(0, [], 0);
+    return best;
+}
+
 /** Scale weights so they total exactly 100 (integers; remainder goes to the largest). */
 export function normalizeWeights(rules) {
     const total = rules.reduce((a, r) => a + Math.max(0, num(r.weight, 0)), 0);
@@ -193,10 +290,12 @@ export function normalizeConfig(raw) {
         }))
         : [];
     c.includeOutside = c.includeOutside === true ? true : c.includeOutside === false ? false : null;
+    c.scoreMode = c.scoreMode === "volume" ? "volume" : "capped";
+    c.volumeZeroAt = Math.max(0.1, num(c.volumeZeroAt, DEFAULT_CONFIG.volumeZeroAt));
     // Profiles always carry exactly the tracked rules; missing entries inherit the default weight.
     const seenProfileGroups = new Set();
     c.profiles = Array.isArray(c.profiles)
-        ? c.profiles.filter(p => p && p.groupId && !seenProfileGroups.has(String(p.groupId)) && seenProfileGroups.add(String(p.groupId))).map((p, i) => {
+        ? c.profiles.filter(p => p && p.groupId && profileTargetExists(String(p.groupId), c) && !seenProfileGroups.has(String(p.groupId)) && seenProfileGroups.add(String(p.groupId))).map((p, i) => {
             const own = new Map((Array.isArray(p.rules) ? p.rules : []).filter(r => r && r.id).map(r => [String(r.id), r]));
             let rules = c.rules.map(r => {
                 const o = own.get(r.id) || {};
@@ -209,6 +308,12 @@ export function normalizeConfig(raw) {
     c.version = 2;
     delete c.normalization;
     return c;
+}
+
+/** A weight profile on a combined group is dropped when that combined group no longer exists. */
+function profileTargetExists(groupId, c) {
+    if (!groupId.startsWith("custom:")) return true;
+    return (c.customGroups || []).some(g => "custom:" + g.id === groupId);
 }
 
 function num(v, d) {
@@ -337,13 +442,78 @@ export function configForProfile(config, key) {
     return m.get(key);
 }
 
-/** Which profile a vehicle is scored with: the first profile whose group contains it. */
-export function profileKeyFor(groupRefs, config, tree) {
-    for (const p of config.profiles || []) {
+const profileMatchCache = new WeakMap();
+/**
+ * For each profile: { id, rank, test(groupIds) }. `rank` is how specific the profile's group is —
+ * its depth in the tree; a combined group ranks just above its deepest included group.
+ */
+function profileMatchers(config, tree) {
+    let hit = profileMatchCache.get(config);
+    if (hit && hit.tree === tree) return hit.list;
+    const depth = id => { let d = 0, cur = id, guard = 0; while (tree && tree.parentOf.has(cur) && guard++ < 50) { cur = tree.parentOf.get(cur); d++; } return d; };
+    const list = (config.profiles || []).map(p => {
+        if (String(p.groupId).startsWith(CUSTOM_PREFIX)) {
+            const cg = (config.customGroups || []).find(g => CUSTOM_PREFIX + g.id === p.groupId);
+            if (!cg || !tree) return { id: p.id, rank: -1, test: () => false };
+            const scope = resolveScope(p.groupId, tree, config, ROOT_GROUP_ID);
+            return { id: p.id, rank: Math.max(0, ...cg.include.map(depth)) + 0.5, test: ids => inScope(ids, scope) };
+        }
         const sub = tree && tree.byId.has(p.groupId) ? tree.descendants(p.groupId) : new Set([p.groupId]);
-        if ((groupRefs || []).some(g => sub.has(typeof g === "string" ? g : g && g.id))) return p.id;
+        return { id: p.id, rank: depth(p.groupId), test: ids => ids.some(id => sub.has(id)) };
+    });
+    profileMatchCache.set(config, { tree, list });
+    return list;
+}
+
+/**
+ * Which profile a vehicle is scored with. When it sits in more than one group that has its own
+ * weights (a division and one of its sub-groups), the most specific group wins.
+ */
+export function profileKeyFor(groupRefs, config, tree) {
+    if (!(config.profiles || []).length) return DEFAULT_PROFILE;
+    const ids = (groupRefs || []).map(g => (typeof g === "string" ? g : g && g.id)).filter(Boolean);
+    let best = DEFAULT_PROFILE, bestRank = -1;
+    for (const m of profileMatchers(config, tree)) {
+        if (m.rank > bestRank && m.test(ids)) { best = m.id; bestRank = m.rank; }
     }
-    return DEFAULT_PROFILE;
+    return best;
+}
+
+/**
+ * The groups offered for their own weights, laid out like the dashboard's location picker:
+ * the Report-by group's sub-groups, then the groups beside it one level up (so the divisions are
+ * still listed while the report is anchored on one of them), then the combined groups.
+ * Returns [{ label, items: [{ id, label }] }]; groups that already have weights are left out.
+ */
+export function profileGroupSections(config, tree) {
+    if (!tree) return [];
+    const taken = new Set((config.profiles || []).map(p => p.groupId));
+    const usable = id => id !== ROOT_GROUP_ID && !isSystemGroupId(id) && tree.byId.has(id) && !taken.has(id);
+    const kidsOf = id => (tree.childrenOf.get(id) || []).filter(usable)
+        .map(k => ({ id: k, label: String(tree.byId.get(k).name) })).sort((a, b) => a.label.localeCompare(b.label));
+    const home = config.displayGroupId && tree.byId.has(config.displayGroupId) ? config.displayGroupId : ROOT_GROUP_ID;
+    const out = [];
+    const own = kidsOf(home);
+    if (own.length) out.push({ label: home === ROOT_GROUP_ID ? "Groups" : String(tree.byId.get(home).name), items: own });
+    const parent = home === ROOT_GROUP_ID ? null : tree.parentOf.get(home);
+    if (parent && parent !== ROOT_GROUP_ID && tree.byId.has(parent)) {
+        const sib = kidsOf(parent);
+        if (sib.length) out.push({ label: String(tree.byId.get(parent).name), items: sib });
+    }
+    const combined = (config.customGroups || []).filter(g => !taken.has(CUSTOM_PREFIX + g.id)).map(g => ({ id: CUSTOM_PREFIX + g.id, label: g.name }));
+    if (combined.length) out.push({ label: "Combined groups", items: combined });
+    return out;
+}
+
+/** Display name of the group a weight profile belongs to (a real group or a combined group). */
+export function profileGroupName(groupId, config, tree) {
+    const id = String(groupId || "");
+    if (id.startsWith(CUSTOM_PREFIX)) {
+        const cg = (config.customGroups || []).find(g => CUSTOM_PREFIX + g.id === id);
+        return cg ? cg.name : "Combined group";
+    }
+    const g = tree && tree.byId.get(id);
+    return g ? g.name : id;
 }
 
 /** Parts of a series (per weight profile) that have distance in period i: [{ key, counts, km }]. */
@@ -369,11 +539,23 @@ export function rateFor(count, distanceKm, config) {
     return exp > 0 ? (count / exp) * 1000 : null;
 }
 
-/** 0–100 sub-score for one rule. */
+export function isVolumeMode(config) { return !!config && config.scoreMode === "volume"; }
+
+/** The rate at which a rule has cost its whole weight: its own sensitivity, or the shared one in volume mode. */
+export function zeroAtFor(rule, config) {
+    return isVolumeMode(config) ? config.volumeZeroAt : rule.maxRate;
+}
+
+/**
+ * Sub-score for one rule: 100 at zero events, 0 when the rate reaches its zero-at value.
+ * Capped mode stops at 0 (the rule has cost its whole weight); volume mode keeps going below 0,
+ * so the rule keeps costing points — the total score is what stops at 0.
+ */
 export function subScoreFor(count, distanceKm, rule, config) {
     const rate = rateFor(count, distanceKm, config);
     if (rate == null) return null;
-    return Math.max(0, 100 * (1 - rate / rule.maxRate));
+    const sub = 100 * (1 - rate / zeroAtFor(rule, config));
+    return isVolumeMode(config) ? sub : Math.max(0, sub);
 }
 
 /**
@@ -384,17 +566,17 @@ export function subScoreFor(count, distanceKm, rule, config) {
 export function scoreFor(counts, distanceKm, config) {
     if (!config.rules.length) return null;
     if (exposureOf(distanceKm, config) < Math.max(config.minDistance, 1e-9)) return null;
-    return weightedScore(counts, distanceKm, config);
+    return Math.min(100, Math.max(0, weightedRaw(counts, distanceKm, config)));
 }
 
-/** Σ subScore × weight for one set of weights — no minimum-distance check. */
-function weightedScore(counts, distanceKm, config) {
+/** Σ subScore × weight for one set of weights — no minimum-distance check, not limited to 0–100. */
+function weightedRaw(counts, distanceKm, config) {
     let total = 0;
     for (const r of config.rules) {
         const sub = subScoreFor(counts[r.id] || 0, distanceKm, r, config);
         total += (sub == null ? 0 : sub) * (r.weight / 100);
     }
-    return Math.min(100, Math.max(0, total));
+    return total;
 }
 
 /** Weighted "unsafe points" — Σ events × weight; context only (rank-free magnitude). */
@@ -560,7 +742,8 @@ export function scoreAt(series, i, config) {
     const parts = partsAt(series, i);
     if (!parts.length) return scoreFor(counts, km, config);
     let acc = 0, dist = 0;
-    for (const p of parts) { acc += p.km * weightedScore(p.counts, p.km, configForProfile(config, p.key)); dist += p.km; }
+    // Average first, limit to 0–100 after: in volume mode a part can be below 0 before the limit.
+    for (const p of parts) { acc += p.km * weightedRaw(p.counts, p.km, configForProfile(config, p.key)); dist += p.km; }
     return Math.min(100, Math.max(0, acc / dist));
 }
 
@@ -613,7 +796,7 @@ export function ruleBreakdown(series, config, idx) {
     const mixed = new Set(parts.map(p => p.key)).size > 1;
     return config.rules.map(r => {
         const c = cur[r.id] || 0, p = prev[r.id] || 0;
-        let weight = r.weight, maxRate = r.maxRate, sub = subScoreFor(c, curKm, r, config), impact = sub == null ? 0 : (100 - sub) * (r.weight / 100);
+        let weight = r.weight, maxRate = zeroAtFor(r, config), sub = subScoreFor(c, curKm, r, config), impact = sub == null ? 0 : (100 - sub) * (r.weight / 100);
         if (parts.length) {
             let w = 0, imp = 0;
             for (const part of parts) {
@@ -621,11 +804,11 @@ export function ruleBreakdown(series, config, idx) {
                 const ps = subScoreFor(part.counts[r.id] || 0, part.km, pr, config);
                 w += (part.km / partKm) * pr.weight;
                 imp += (part.km / partKm) * (ps == null ? 0 : (100 - ps) * (pr.weight / 100));
-                if (!mixed) maxRate = pr.maxRate;
+                if (!mixed) maxRate = zeroAtFor(pr, config);
             }
             weight = Math.round(w * 10) / 10;
             impact = imp;
-            sub = w > 0 ? Math.max(0, 100 - (imp * 100) / w) : sub;
+            sub = w > 0 ? (isVolumeMode(config) ? 100 - (imp * 100) / w : Math.max(0, 100 - (imp * 100) / w)) : sub;
         }
         return {
             id: r.id, name: r.name, weight, maxRate, mixed,

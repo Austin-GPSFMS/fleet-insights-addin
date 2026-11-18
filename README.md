@@ -9,7 +9,7 @@ time — by group, drilled down to individual vehicles and drivers.
 session. No proxy, no server, no data leaves Geotab. Settings are stored in the database as
 `AddInData` so every user sees the same score definition.
 
-## What it does (v0.7)
+## What it does (v0.8)
 
 - **Score trend** — safety score **out of 100** per **calendar** period (weeks starting Monday or
   Sunday, calendar months, or days), last N periods, higher is better, band lines for Low / Medium
@@ -76,6 +76,31 @@ session. No proxy, no server, no data leaves Geotab. Settings are stored in the 
   Each set must total 100%. Events and miles are filed under the weights of the vehicle they happened
   on (drivers included); totals that mix divisions are the distance-weighted average of their parts,
   and the rule list marks blended weights with "~". The export's Scoring model sheet lists every set.
+- **Suggest weights** (Settings → Tracked rules) — one click sets every weight from the rule names;
+  nothing to pick. Rules fall into three levels — the ones GoAnalytics shows in its Score Breakdown —
+  and an event counts 2× (phone use, distraction, speeding 15+ over), 1.5× (lens obstruction, speeding
+  10+ over) or 1× (seat belt, harsh driving); each rule's weight is its share of 100%, whole numbers,
+  rules of one level equal (ILB's 9 rules → 16 / 12 / 7). The ratio is an **estimate** fitted to a
+  GoAnalytics scorecard (ILB SoCal, 103 drivers, 7 days): High ≈ 1.8 × Mild (80% range 1.5–2.3), Medium
+  not distinguishable from Mild. The scorecard has no distance column, so it cannot be solved exactly.
+  Weights stay editable; sensitivity ("zero at") is not touched. Works for a group's own weights too.
+  In the Standard method weights alone only partly reproduce GoAnalytics' ranking (per-rule ceiling and
+  per-rule sensitivity); the Volume-based method below removes both differences.
+- **Scoring method** (Settings → Scoring) — *Standard*: each rule has its own sensitivity and can cost
+  at most its weight. *Volume-based*: one sensitivity for every rule and **no ceiling per rule** —
+  `score = max(0, 100 − Σ weight × rate ÷ sensitivity)`. Every event keeps costing points until the
+  score reaches 0, so a driver with a very high count of one kind of event is not hidden behind that
+  rule's weight, and a rule's weight is exactly what one of its events costs relative to the others.
+  This is how GoAnalytics ranks (their score is points ÷ exposure with no ceiling), so with the
+  suggested weights the ranking follows theirs. Default sensitivity 25 events per 1,000 mi — a
+  placeholder until it is calibrated against real distance data (target: GoAnalytics' 450 "high risk"
+  line ≈ our 75). Standard stays the default; switching is one select and is saved with the settings.
+- **"Weights for" lists the locations** — the group list for division weights mirrors the dashboard's
+  location picker: the Report-by group's sub-groups, the groups beside it one level up (so the
+  divisions stay listed while the report is anchored on one of them), then the combined groups; the
+  full tree is behind "Other groups…". A combined group can have its own weights. When a vehicle is in
+  two groups that both have weights, the more specific one wins (sub-group over division; a combined
+  group over the division it is built from).
 - **Assets to score** (Settings) — device types present in the database with counts; untracked
   assets (`None`), GO Anywhere battery trackers (`GoAnywhere`, `GoAnywhereLite`, `Gemini`),
   third-party and GoDrive-only devices are excluded by default. Whole groups (with sub-groups) can be
@@ -91,6 +116,9 @@ rate(rule)     = events(rule) ÷ distance × 1,000          events per 1,000 mi 
 subScore(rule) = 100 × max(0, 1 − rate ÷ zeroAt(rule))    0–100; zeroAt = rate that scores 0
 score          = Σ subScore(rule) × weight(rule) ÷ 100     weights total 100%
 change         = current − previous (score points)
+
+Volume-based method (Settings → Scoring method):
+score          = max(0, 100 − Σ weight(rule) × rate(rule) ÷ sensitivity)   one sensitivity, no per-rule ceiling
 ```
 
 Worked example with phone use at 41% weight, zero-at 5 / 1,000 mi: one phone event in 500 mi

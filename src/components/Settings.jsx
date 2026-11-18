@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@geotab/zenith/dist/button/button";
 import { Banner } from "@geotab/zenith/dist/banner/banner";
-import { normalizeConfig, normalizeWeights, weightTotal, suggestMaxRate, suggestRelativeWeight, WEIGHT_SUGGESTIONS, DEVICE_TYPE_LABELS, ROOT_GROUP_ID, isUntrackedSerial, resolveScope, devicesInScope, CUSTOM_PREFIX } from "../model.js";
+import {
+    normalizeConfig, normalizeWeights, weightTotal, suggestMaxRate, suggestRelativeWeight, WEIGHT_SUGGESTIONS, DEVICE_TYPE_LABELS, ROOT_GROUP_ID, isUntrackedSerial,
+    resolveScope, devicesInScope, CUSTOM_PREFIX, SEVERITY_FACTORS, suggestWeights, profileGroupName, profileGroupSections
+} from "../model.js";
 
 export function Settings({ config, rules, devices = [], groups = [], tree, onSave, onCancel, saving, saveInfo, hiddenCount = 0, onClearHidden, focusSection }) {
     const [draft, setDraft] = useState(() => JSON.parse(JSON.stringify(config)));
@@ -88,19 +91,27 @@ export function Settings({ config, rules, devices = [], groups = [], tree, onSav
         return { ...r, weight: o.weight != null ? o.weight : r.weight, maxRate: o.maxRate != null ? o.maxRate : r.maxRate };
     });
     const editRules = activeProfile ? rulesOf(activeProfile) : draft.rules;
-    const setProfileRules = (id, list) => setDraft({ ...draft, profiles: profiles.map(p => (p.id === id ? { ...p, rules: list.map(r => ({ id: r.id, weight: r.weight, maxRate: r.maxRate })) } : p)) });
+    const slim = r => ({ id: r.id, weight: r.weight, maxRate: r.maxRate });
+    const setProfileRules = (id, list) => setDraft({ ...draft, profiles: profiles.map(p => (p.id === id ? { ...p, rules: list.map(slim) } : p)) });
+    const profileName = gid => profileGroupName(gid, draft, tree);
+    // The groups offered for their own weights mirror the dashboard's location picker: the
+    // Report-by group's sub-groups, its sibling groups one level up, and the combined groups.
+    // The whole group tree stays available behind "Other groups…".
+    const [allProfileGroups, setAllProfileGroups] = useState(false);
+    const profileSections = useMemo(() => profileGroupSections(draft, tree), [tree, draft.profiles, draft.displayGroupId, draft.customGroups]); // eslint-disable-line react-hooks/exhaustive-deps
     const profileCandidates = useMemo(() => {
         const taken = new Set(profiles.map(p => p.groupId));
-        const kids = new Set(draft.displayGroupId && tree ? (tree.childrenOf.get(draft.displayGroupId) || []) : []);
         return groups
             .filter(g => g.id !== ROOT_GROUP_ID && !/^Group[A-Za-z]+Id$/.test(g.id) && !taken.has(g.id))
-            .map(g => ({ id: g.id, path: tree ? pathOf(g.id, tree) : g.name, first: kids.has(g.id) }))
-            .sort((a, b) => (a.first === b.first ? a.path.localeCompare(b.path) : a.first ? -1 : 1));
-    }, [groups, tree, profiles, draft.displayGroupId]);
+            .map(g => ({ id: g.id, path: tree ? pathOf(g.id, tree) : g.name }))
+            .sort((a, b) => a.path.localeCompare(b.path));
+    }, [groups, tree, profiles]);
     const addProfile = groupId => {
         if (!groupId) return;
+        if (groupId === "__all") { setAllProfileGroups(true); return; }
+        if (groupId === "__locations") { setAllProfileGroups(false); return; }
         const id = `p${Date.now().toString(36)}`;
-        setDraft({ ...draft, profiles: [...profiles, { id, groupId, rules: draft.rules.map(r => ({ id: r.id, weight: r.weight, maxRate: r.maxRate })) }] });
+        setDraft({ ...draft, profiles: [...profiles, { id, groupId, rules: draft.rules.map(slim) }] });
         setProfileSel(id);
     };
     const removeProfile = id => { setDraft({ ...draft, profiles: profiles.filter(p => p.id !== id) }); setProfileSel(""); };
@@ -113,20 +124,20 @@ export function Settings({ config, rules, devices = [], groups = [], tree, onSav
     const total = weightTotal(editRules.map(r => ({ weight: Number(r.weight) || 0 })));
     const totalOk = Math.abs(total - 100) < 0.01;
     const unitShort = draft.unit === "km" ? "km" : "mi";
+    const volume = draft.scoreMode === "volume";
 
     const toggle = rule => {
         if (selected.has(rule.id)) setDraft({ ...draft, rules: draft.rules.filter(r => r.id !== rule.id) });
         else setDraft({ ...draft, rules: [...draft.rules, { id: rule.id, name: rule.name, weight: suggestRelativeWeight(rule.name), maxRate: suggestMaxRate(rule.name) }] });
     };
-    const patchRule = (id, patch) => {
-        if (activeProfile) setProfileRules(activeProfile.id, editRules.map(r => (r.id === id ? { ...r, ...patch } : r)));
-        else setDraft({ ...draft, rules: draft.rules.map(r => (r.id === id ? { ...r, ...patch } : r)) });
-    };
-    const rebalance = () => {
-        const list = normalizeWeights(editRules.map(r => ({ ...r, weight: Number(r.weight) || 0 })));
+    const setEditRules = list => {
         if (activeProfile) setProfileRules(activeProfile.id, list);
         else setDraft({ ...draft, rules: list });
     };
+    const patchRule = (id, patch) => setEditRules(editRules.map(r => (r.id === id ? { ...r, ...patch } : r)));
+    const rebalance = () => setEditRules(normalizeWeights(editRules.map(r => ({ ...r, weight: Number(r.weight) || 0 }))));
+    // One click: weights that follow GoAnalytics' three levels, worked out from the rule names.
+    const applySuggestedWeights = () => setEditRules(suggestWeights(editRules));
     const suggest = () => {
         const picks = rules.filter(r => WEIGHT_SUGGESTIONS.some(([re]) => re.test(String(r.name))) && !/ignore|count/i.test(r.id));
         const merged = new Map(draft.rules.map(r => [r.id, r]));
@@ -139,11 +150,12 @@ export function Settings({ config, rules, devices = [], groups = [], tree, onSav
         const defTotal = weightTotal(draft.rules.map(r => ({ weight: Number(r.weight) || 0 })));
         if (Math.abs(defTotal - 100) >= 0.01) { setProfileSel(""); setError(`The default weights must total 100% (currently ${Math.round(defTotal * 10) / 10}%). Use "Rebalance to 100%" or adjust them.`); return; }
         if (draft.rules.some(r => !(Number(r.maxRate) > 0))) { setError("Every rule needs a 'zero-score rate' greater than zero."); return; }
+        if (volume && !(Number(draft.volumeZeroAt) >= 1)) { setError("The volume-based sensitivity must be 1 or more."); return; }
         for (const prof of profiles) {
             const list = rulesOf(prof);
             const t = weightTotal(list.map(r => ({ weight: Number(r.weight) || 0 })));
-            if (Math.abs(t - 100) >= 0.01) { setProfileSel(prof.id); setError(`The weights for ${nameOf(prof.groupId)} total ${Math.round(t * 10) / 10}% — they must total 100%. Adjust them or use "Rebalance to 100%".`); return; }
-            if (list.some(r => !(Number(r.maxRate) > 0))) { setProfileSel(prof.id); setError(`Every rule in the weights for ${nameOf(prof.groupId)} needs a 'zero-score rate' greater than zero.`); return; }
+            if (Math.abs(t - 100) >= 0.01) { setProfileSel(prof.id); setError(`The weights for ${profileName(prof.groupId)} total ${Math.round(t * 10) / 10}% — they must total 100%. Adjust them or use "Rebalance to 100%".`); return; }
+            if (list.some(r => !(Number(r.maxRate) > 0))) { setProfileSel(prof.id); setError(`Every rule in the weights for ${profileName(prof.groupId)} needs a 'zero-score rate' greater than zero.`); return; }
         }
         setError(null);
         onSave(normalizeConfig({ ...draft, customGroups: withCgCommitted(draft.customGroups || []), version: 2 }));
@@ -171,8 +183,9 @@ export function Settings({ config, rules, devices = [], groups = [], tree, onSav
                         <h4>Tracked rules <span className={`fi-total ${totalOk ? "fi-total--ok" : "fi-total--bad"}`}>{Math.round(total * 10) / 10}% of 100%</span></h4>
                         <div className="fi-actions">
                             {!activeProfile && <Button type="tertiary" onClick={suggest}>Suggest safety rules</Button>}
+                            <Button type="tertiary" onClick={applySuggestedWeights} disabled={!draft.rules.length}>Suggest weights</Button>
                             <Button type="tertiary" onClick={rebalance} disabled={!draft.rules.length}>Rebalance to 100%</Button>
-                            <Button type="tertiary" onClick={() => setShowAdvanced(v => !v)}>{showAdvanced ? "Hide" : "Show"} sensitivity</Button>
+                            {!volume && <Button type="tertiary" onClick={() => setShowAdvanced(v => !v)}>{showAdvanced ? "Hide" : "Show"} sensitivity</Button>}
                         </div>
                     </div>
                     {draft.rules.length > 0 && (
@@ -180,17 +193,25 @@ export function Settings({ config, rules, devices = [], groups = [], tree, onSav
                             <span className="fi-muted">Weights for</span>
                             <select className="fi-input fi-input--inline" value={profileSel} onChange={e => setProfileSel(e.target.value)} aria-label="Weights for">
                                 <option value="">All vehicles (default)</option>
-                                {profiles.map(p => <option key={p.id} value={p.id}>{nameOf(p.groupId)}</option>)}
+                                {profiles.map(p => <option key={p.id} value={p.id}>{profileName(p.groupId)}</option>)}
                             </select>
                             <select className="fi-input fi-input--inline" value="" onChange={e => addProfile(e.target.value)} aria-label="Add weights for a group">
                                 <option value="">+ Different weights for a group…</option>
-                                {profileCandidates.slice(0, 400).map(g => <option key={g.id} value={g.id}>{g.path}</option>)}
+                                {!allProfileGroups && profileSections.map(sec => (
+                                    <optgroup key={sec.label} label={sec.label}>
+                                        {sec.items.map(g => <option key={g.id} value={g.id}>{g.label}</option>)}
+                                    </optgroup>
+                                ))}
+                                {!allProfileGroups && <option value="__all">Other groups…</option>}
+                                {allProfileGroups && <option value="__locations">← Back to locations</option>}
+                                {allProfileGroups && profileCandidates.slice(0, 400).map(g => <option key={g.id} value={g.id}>{g.path}</option>)}
                             </select>
+                            {allProfileGroups && <span className="fi-muted fi-small">showing every group — open the list again</span>}
                             {activeProfile && <button className="fi-linkbtn" onClick={() => removeProfile(activeProfile.id)}>Remove these weights</button>}
                         </div>
                     )}
                     {activeProfile && (
-                        <p className="fi-muted fi-small fi-profilehint">Vehicles in <strong>{nameOf(activeProfile.groupId)}</strong> (and its sub-groups) are scored with these weights instead of the default — for example a lower weight or a more forgiving “zero at” for harsh braking. The list of tracked rules is shared: add or remove rules under “All vehicles (default)”.</p>
+                        <p className="fi-muted fi-small fi-profilehint">Vehicles in <strong>{profileName(activeProfile.groupId)}</strong>{String(activeProfile.groupId).startsWith(CUSTOM_PREFIX) ? " (combined group)" : " (and its sub-groups)"} are scored with these weights instead of the default — for example a lower weight or a more forgiving “zero at” for harsh braking. If a vehicle is in two groups that have their own weights, the more specific group wins. The list of tracked rules is shared: add or remove rules under “All vehicles (default)”.</p>
                     )}
                     {draft.rules.length > 0 && (
                         <table className="fi-table fi-table--compact">
@@ -198,7 +219,7 @@ export function Settings({ config, rules, devices = [], groups = [], tree, onSav
                                 <tr>
                                     <th>Rule</th>
                                     <th className="fi-right" style={{ width: 110 }}>Weight %</th>
-                                    {showAdvanced && <th className="fi-right" style={{ width: 170 }} title="Events per 1,000 of exposure at which this rule's sub-score reaches 0">Zero at (events / 1,000 {unitShort})</th>}
+                                    {showAdvanced && !volume && <th className="fi-right" style={{ width: 170 }} title="Events per 1,000 of exposure at which this rule's sub-score reaches 0">Zero at (events / 1,000 {unitShort})</th>}
                                     <th style={{ width: 70 }}></th>
                                 </tr>
                             </thead>
@@ -206,15 +227,21 @@ export function Settings({ config, rules, devices = [], groups = [], tree, onSav
                                 {editRules.map(r => (
                                     <tr key={r.id}>
                                         <td>{r.name}</td>
-                                        <td className="fi-right"><input className="fi-input fi-input--num" type="number" min="0" max="100" step="1" value={r.weight} onChange={e => patchRule(r.id, { weight: e.target.value })} /></td>
-                                        {showAdvanced && <td className="fi-right"><input className="fi-input fi-input--num" type="number" min="0.1" step="1" value={r.maxRate} onChange={e => patchRule(r.id, { maxRate: e.target.value })} /></td>}
+                                        <td className="fi-right"><input className="fi-input fi-input--num" type="number" min="0" max="100" step="1" value={r.weight} onChange={e => patchRule(r.id, { weight: e.target.value })} aria-label={`Weight for ${r.name}`} /></td>
+                                        {showAdvanced && !volume && <td className="fi-right"><input className="fi-input fi-input--num" type="number" min="0.1" step="1" value={r.maxRate} onChange={e => patchRule(r.id, { maxRate: e.target.value })} /></td>}
                                         <td className="fi-right">{!activeProfile && <button className="fi-linkbtn" onClick={() => toggle(r)}>Remove</button>}</td>
                                     </tr>
                                 ))}
                             </tbody>
                         </table>
                     )}
-                    {showAdvanced && (
+                    {draft.rules.length > 0 && (
+                        <p className="fi-muted fi-small fi-sevhint"><strong>Suggest weights</strong> sets every weight for you from the rule names: phone use, distraction and speeding 15+ over count {SEVERITY_FACTORS.high}×, lens obstruction and speeding 10+ over {SEVERITY_FACTORS.medium}×, seat belt and harsh driving {SEVERITY_FACTORS.mild}×. You can still type any weight.</p>
+                    )}
+                    {volume && draft.rules.length > 0 && (
+                        <p className="fi-muted fi-small">Volume-based scoring uses one sensitivity for every rule (set under Scoring), so a rule's weight is exactly how much one of its events costs compared with the others.</p>
+                    )}
+                    {showAdvanced && !volume && (
                         <p className="fi-muted fi-small">Sensitivity: a rule scores 100 at zero events and falls to 0 when its rate reaches the "zero at" value. Example — phone use at 5 / 1,000 mi: one phone event in 500 mi (2 / 1,000) scores 60; one in 5,000 mi (0.2 / 1,000) scores 96.</p>
                     )}
                     <div className="fi-rule-picker">
@@ -237,6 +264,19 @@ export function Settings({ config, rules, devices = [], groups = [], tree, onSav
                 <section className="fi-card fi-card--flat">
                     <h4>Scoring</h4>
                     <div className="fi-form">
+                        <label className="fi-field">
+                            <span>Scoring method</span>
+                            <select className="fi-input" value={volume ? "volume" : "capped"} onChange={e => setDraft({ ...draft, scoreMode: e.target.value })} aria-label="Scoring method">
+                                <option value="capped">Standard — a rule can cost at most its weight</option>
+                                <option value="volume">Volume-based — every event keeps costing points</option>
+                            </select>
+                        </label>
+                        {volume && (
+                            <label className="fi-field">
+                                <span>Sensitivity: events per 1,000 {unitShort} at which a rule has cost its whole weight</span>
+                                <input className="fi-input fi-input--num" type="number" min="1" step="1" value={draft.volumeZeroAt} onChange={e => setDraft({ ...draft, volumeZeroAt: e.target.value })} aria-label="Volume sensitivity" />
+                            </label>
+                        )}
                         <label className="fi-field">
                             <span>Period</span>
                             <select className="fi-input" value={draft.period} onChange={e => setDraft({ ...draft, period: e.target.value })}>
@@ -281,8 +321,10 @@ export function Settings({ config, rules, devices = [], groups = [], tree, onSav
                     <div className="fi-formula">
                         <h5>How the score is calculated</h5>
                         <code>rate = events ÷ distance × 1,000</code>
-                        <code>rule score = 100 × max(0, 1 − rate ÷ zero-at)</code>
-                        <code>score = Σ rule score × weight ÷ 100</code>
+                        {volume
+                            ? <><code>points lost = Σ weight × rate ÷ {Number(draft.volumeZeroAt) || 25}</code><code>score = max(0, 100 − points lost)</code></>
+                            : <><code>rule score = 100 × max(0, 1 − rate ÷ zero-at)</code><code>score = Σ rule score × weight ÷ 100</code></>}
+                        {volume && <p className="fi-muted">Volume-based: there is no ceiling per rule. A rule at {Number(draft.volumeZeroAt) || 25} events per 1,000 {unitShort} has cost its whole weight, at twice that rate it costs twice its weight, and so on until the score reaches 0 — so a driver with a very high count of one kind of event is not hidden behind that rule's weight. Lower the sensitivity number to make the score stricter, raise it to make it more forgiving.</p>}
                         <p className="fi-muted">Higher is better; 100 means no tracked events. Distance comes from MyGeotab trips in the same period, so 10 events over 10,000 {unitShort} scores far better than 10 events over 100 {unitShort}. Periods are calendar-aligned, so a completed week's score never changes; the current period is shown "to date" and its score is a rate, so it is comparable to full periods. Change compares a period with the one before it.</p>
                     </div>
                     <div className="fi-formula">

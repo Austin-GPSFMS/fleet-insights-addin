@@ -374,7 +374,110 @@ const sbWeight = await page.$eval(".fi-dash .fi-grid-2 > section:nth-child(2) tr
 if (!/· 0%/.test(sbWeight)) throw new Error("NorCal's rule list should show its own weight: " + sbWeight);
 await page.selectOption(".fi-locpick", "__all");
 await page.click(".fi-tab:has-text('Groups')");
+
+/* ---- 11) "Weights for" lists the locations like the dashboard; one-click suggested weights ---- */
+await page.click("button:has-text('Settings')");
+await page.waitForSelector(".fi-profilebar");
+const addSel = ".fi-profilebar select[aria-label='Add weights for a group']";
+const sections11 = await page.$$eval(`${addSel} optgroup`, g => g.map(x => ({ label: x.label, items: [...x.querySelectorAll("option")].map(o => o.textContent) })));
+log("weights-for list:", sections11.map(x => `${x.label} [${x.items.join(", ")}]`).join(" | "));
+const loc11 = sections11.find(x => x.label === "Locations");
+if (!loc11 || !loc11.items.includes("Southern California Division") || !loc11.items.includes("Oregon division")) throw new Error("the Locations divisions should be listed by name");
+if (loc11.items.includes("Northern California division")) throw new Error("a group that already has its own weights should not be offered again");
+if (sections11.some(x => x.items.some(t => t.includes(" / ")))) throw new Error("the short list should show names, not full paths");
+const comb11 = sections11.find(x => x.label === "Combined groups");
+if (!comb11 || !comb11.items.includes("SoCal + Oregon")) throw new Error("combined groups should be offered for their own weights");
+// the whole tree is one step away, and back
+await page.selectOption(addSel, "__all");
+await page.waitForFunction(sel => [...document.querySelectorAll(sel + " option")].some(o => o.textContent.includes(" / ")), addSel);
+await page.selectOption(addSel, "__locations");
+await page.waitForFunction(sel => document.querySelectorAll(sel + " optgroup").length > 0, addSel);
+// a combined group can carry its own weights
+const combId = await page.$eval(`${addSel} optgroup[label='Combined groups'] option`, o => o.value);
+await page.selectOption(addSel, combId);
+await page.waitForSelector(".fi-profilehint:has-text('SoCal + Oregon')");
+if (!/combined group/.test(await page.$eval(".fi-profilehint", e => e.textContent))) throw new Error("hint should say it is a combined group");
+await page.click("button:has-text('Remove these weights')");
+// default weights: one click, no picking — levels come from the rule names
+if (await page.$(".fi-settings select[aria-label^='Severity']")) throw new Error("there should be no severity picker");
+await page.click("button:has-text('Suggest weights')");
+const wOf = async name => Number(await page.$eval(`.fi-settings input[aria-label='Weight for ${name}']`, e => e.value));
+const w11 = { phone: await wOf("Cell phone use"), distracted: await wOf("Distracted Driving 35+"), lens: await wOf("Lens obstruction"), speed10: await wOf("Speeding +10 Over Posted"),
+    belt: await wOf("Driver Seat Belt +25 MPH"), brake: await wOf("Harsh Braking - Med/Heavy"), corner: await wOf("Harsh Cornering - Med/Heavy"), accel: await wOf("Hard Acceleration - Med/Heavy") };
+log("suggested weights:", JSON.stringify(w11), "|", await page.$eval(".fi-total", e => e.textContent));
+if (w11.phone !== w11.distracted || w11.lens !== w11.speed10 || new Set([w11.belt, w11.brake, w11.corner, w11.accel]).size !== 1) throw new Error("rules of one level should get the same weight");
+if (!(w11.phone > w11.lens && w11.lens > w11.belt)) throw new Error("High > Medium > Mild expected");
+if (Math.abs(w11.phone / w11.belt - 2) > 0.35 || Math.abs(w11.lens / w11.belt - 1.5) > 0.35) throw new Error("level ratio should be about 2 : 1.5 : 1");
+if (!/^100% of 100%/.test(await page.$eval(".fi-total", e => e.textContent))) throw new Error("suggested weights must total 100%");
+// still editable by hand; the total reacts and Rebalance fixes it
+await page.fill(".fi-settings input[aria-label='Weight for Driver Seat Belt +25 MPH']", "20");
+if (/^100% of 100%/.test(await page.$eval(".fi-total", e => e.textContent))) throw new Error("a typed weight should change the total");
+await page.click("button:has-text('Suggest weights')");
+if (await wOf("Driver Seat Belt +25 MPH") !== w11.belt) throw new Error("Suggest weights should restore the suggested values");
+// a group's own weights get the same one-click suggestion, without touching the default
+await page.selectOption(".fi-profilebar select[aria-label='Weights for']", { label: "Northern California division" });
+const norBelt = await wOf("Driver Seat Belt +25 MPH");
+if (norBelt !== 0) throw new Error("NorCal should still carry its own weights: " + norBelt);
+await page.selectOption(".fi-profilebar select[aria-label='Weights for']", "");
+await page.screenshot({ path: join(here, "shots/07-suggested-weights.png"), fullPage: false });
+await page.click("button:has-text(\"Save settings\")");
+await page.waitForSelector(".fi-dash", { timeout: 60000 });
+await page.click(".fi-perf tbody tr:has-text('Southern California Division') .fi-minibtn:has-text('Vehicles')");
+await page.waitForSelector(".fi-weightsnote:has-text('Weights: default')");
+const cell11 = await page.$eval(".fi-dash .fi-grid-2 > section:nth-child(2) tr:has-text('Cell phone use') td", e => e.textContent);
+if (!cell11.includes(`${w11.phone}%`)) throw new Error("dashboard should show the suggested weight: " + cell11);
+log("dashboard rule list:", cell11);
+// the weights survive a reload (saved in AddInData)
+await page.reload();
+await page.waitForFunction(() => window.__initialized);
+await page.waitForSelector(".fi-dash", { timeout: 60000 });
+await page.click("button:has-text('Settings')");
+await page.waitForSelector(".fi-profilebar");
+if (await wOf("Cell phone use") !== w11.phone) throw new Error("suggested weights should persist");
+await page.click("button:has-text('Cancel')");
+await page.waitForSelector(".fi-dash", { timeout: 60000 });
+await page.click(".fi-perf tbody tr:has-text('Southern California Division') .fi-minibtn:has-text('Vehicles')");
+await page.waitForSelector(".fi-weightsnote:has-text('Weights: default')");
 await page.screenshot({ path: join(here, "shots/02-dashboard.png"), fullPage: false });
+
+/* ---- 12) Volume-based scoring: one sensitivity, no ceiling per rule ---- */
+const vehScores = () => page.$$eval(".fi-perf tbody tr .fi-hbar-label", els => els.map(e => parseInt(e.textContent, 10)));
+const ruleImpacts = () => page.$$eval(".fi-dash .fi-grid-2 > section:nth-child(2) tbody tr", trs => trs.map(tr => ({ name: tr.children[0].textContent, impact: tr.children[1].textContent })));
+const stdScores = await vehScores();
+await page.click("button:has-text('Settings')");
+await page.waitForSelector(".fi-settings select[aria-label='Scoring method']");
+if (await page.$(".fi-settings input[aria-label='Volume sensitivity']")) throw new Error("the volume sensitivity should only show in volume mode");
+await page.selectOption(".fi-settings select[aria-label='Scoring method']", "volume");
+await page.waitForSelector(".fi-settings input[aria-label='Volume sensitivity']");
+if (await page.$eval(".fi-settings input[aria-label='Volume sensitivity']", e => e.value) !== "25") throw new Error("default volume sensitivity should be 25");
+if (await page.$("button:has-text('Show sensitivity')")) throw new Error("per-rule sensitivity is not used in volume mode and should be hidden");
+if (!/points lost = Σ weight × rate ÷ 25/.test(await page.$eval(".fi-formula", e => e.textContent))) throw new Error("the formula box should describe volume-based scoring");
+await page.screenshot({ path: join(here, "shots/08-volume-settings.png"), fullPage: false });
+await page.fill(".fi-settings input[aria-label='Volume sensitivity']", "0");
+await page.click("button:has-text(\"Save settings\")");
+await page.waitForSelector("text=The volume-based sensitivity must be 1 or more");
+await page.fill(".fi-settings input[aria-label='Volume sensitivity']", "25");
+await page.click("button:has-text(\"Save settings\")");
+await page.waitForSelector(".fi-dash", { timeout: 60000 });
+await page.selectOption(".fi-locpick", "gLocSoCal");
+await page.click(".fi-tab:has-text('Vehicles')");
+await page.waitForSelector(".fi-weightsnote:has-text('Weights: default')");
+const volScores = await vehScores();
+log("standard → volume-based, worst five:", stdScores.slice(0, 5).join(","), "→", volScores.slice(0, 5).join(","));
+if (JSON.stringify(volScores) === JSON.stringify(stdScores)) throw new Error("switching the scoring method should change the scores");
+if (volScores.some(v => !(v >= 0 && v <= 100))) throw new Error("scores must stay within 0–100");
+log("volume-based rule list:", (await ruleImpacts()).slice(0, 3).map(r => `${r.name} ${r.impact}`).join(" | "));
+await page.screenshot({ path: join(here, "shots/09-volume-dashboard.png"), fullPage: false });
+// export still works and states the method
+const [dl12] = await Promise.all([page.waitForEvent("download"), (async () => { await page.click("button:has-text('Export')"); await page.click(".fi-menu-item:has-text('Excel')"); })()]);
+log("volume-mode excel:", dl12.suggestedFilename());
+// the method survives a reload
+await page.reload();
+await page.waitForFunction(() => window.__initialized);
+await page.waitForSelector(".fi-dash", { timeout: 60000 });
+await page.click("button:has-text('Settings')");
+await page.waitForSelector(".fi-settings select[aria-label='Scoring method']");
+if (await page.$eval(".fi-settings select[aria-label='Scoring method']", e => e.value) !== "volume") throw new Error("scoring method should persist");
 await page.close();
 
 /* ===================== run 2: server without a Dismissed state → local hide ===================== */

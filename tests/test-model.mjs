@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+    zeroAtFor, suggestSeverity, suggestWeights, weightsFromSeverity, profileGroupName, profileGroupSections, SEVERITY_FACTORS,
     profileKeyFor, configForProfile, scoreAt, profilesAt,
     resolveScope, inScope, devicesInScope, shouldIncludeOutside, buildRangePeriods, focusLabel, lastBarLabel,
     displayGroupLabel, isSystemGroupId,
@@ -407,6 +408,145 @@ test("weight profiles: a division scores with its own weights; mixed totals are 
     const plain = normalizeConfig(base);
     const agg2 = aggregate({ periods: P, config: plain, exceptions, trips, deviceIds: new Set(["n1", "s1"]) });
     assert.equal(scoreAt(agg2.byDevice.get("n1"), 1, plain), scoreFor({ brake: 20 }, mi(1000), plain));
+});
+
+test("suggested weights: three levels by rule name, GoAnalytics-like proportions, always total 100", () => {
+    assert.deepEqual(SEVERITY_FACTORS, { high: 2, medium: 1.5, mild: 1 });
+    // The ILB rule set, with the levels GoAnalytics shows in its Score Breakdown
+    const ilb = [
+        ["Cell phone use", "high"], ["Distracted Driving 35+", "high"], ["Speeding +15 Over Posted (Agregious)", "high"],
+        ["Lens obstruction", "medium"], ["Speeding +10 Over Posted", "medium"],
+        ["Driver Seat Belt +25 MPH", "mild"], ["Hard Acceleration - Outside Zones", "mild"],
+        ["Harsh Braking - Vehicle Type + 15 MPH", "mild"], ["Harsh Cornering - Vehicle Type + 15 MPH", "mild"]
+    ];
+    for (const [name, level] of ilb) assert.equal(suggestSeverity(name), level, name);
+    const rules = suggestWeights(ilb.map(([name], i) => ({ id: "r" + i, name, weight: 0, maxRate: 10 + i })));
+    assert.deepEqual(rules.map(r => r.weight), [16, 16, 16, 12, 12, 7, 7, 7, 7]);
+    assert.deepEqual(rules.map(r => r.maxRate), ilb.map((x, i) => 10 + i));          // sensitivity is left alone
+    assert.deepEqual(Object.keys(rules[0]), ["id", "name", "weight", "maxRate"]);     // nothing extra is stored
+    // rules of one level always match when whole numbers allow it
+    const odd = weightsFromSeverity([
+        { id: "a", severity: "high" }, { id: "b", severity: "high" },
+        { id: "c", severity: "medium" }, { id: "d", severity: "medium" },
+        { id: "e", severity: "mild" }, { id: "f", severity: "mild" }, { id: "g", severity: "mild" }
+    ]);
+    assert.deepEqual(odd.map(r => r.weight), [20, 20, 15, 15, 10, 10, 10]);
+    // when they can't be equal (three High sharing 100) the total still wins
+    assert.deepEqual(weightsFromSeverity([{ id: "a", severity: "high" }, { id: "b", severity: "high" }, { id: "c", severity: "high" }]).map(r => r.weight), [34, 33, 33]);
+    assert.deepEqual(weightsFromSeverity([{ id: "a", severity: "mild" }, { id: "b", severity: "mild" }]).map(r => r.weight), [50, 50]);
+    // a config saved by the short-lived severity picker loads cleanly: the extra field is dropped
+    const cfg = normalizeConfig({ version: 2, rules: [{ id: "x", name: "X", weight: 60, maxRate: 5, severity: "high" }, { id: "y", name: "Y", weight: 40, maxRate: 5, severity: null }],
+        profiles: [{ id: "p1", groupId: "gX", rules: [{ id: "x", weight: 80, severity: "mild" }, { id: "y", weight: 20 }] }] });
+    assert.deepEqual(cfg.rules.map(r => [r.weight, "severity" in r]), [[60, false], [40, false]]);
+    assert.deepEqual(cfg.profiles[0].rules.map(r => [r.weight, "severity" in r]), [[80, false], [20, false]]);
+});
+
+test("weights for a group: the most specific group wins; combined groups can have their own", () => {
+    const groups = [
+        { id: "GroupCompanyId", name: "Company Group", children: [{ id: "gLoc" }] },
+        { id: "gLoc", name: "Locations", children: [{ id: "gSo" }, { id: "gNor" }] },
+        { id: "gSo", name: "Southern California Division", children: [{ id: "gCivil" }, { id: "gElec" }, { id: "gFleet" }] },
+        { id: "gNor", name: "Northern California division", children: [] },
+        { id: "gCivil", name: "ILB Civil Underground", children: [] },
+        { id: "gElec", name: "ILB Electric", children: [] },
+        { id: "gFleet", name: "Fleet Shop", children: [] }
+    ];
+    const tree = buildGroupTree(groups);
+    const rules = [{ id: "a", name: "A", weight: 50, maxRate: 10 }, { id: "b", name: "B", weight: 50, maxRate: 10 }];
+    const customGroups = [{ id: "cf", name: "Civil + Fleet", include: ["gSo"], exclude: ["gElec"] }];
+    // listed division first, sub-group second: the order in the list must not decide
+    const cfg = normalizeConfig({ version: 2, rules, customGroups, profiles: [
+        { id: "so", groupId: "gSo", rules },
+        { id: "elec", groupId: "gElec", rules },
+        { id: "cf", groupId: "custom:cf", rules },
+        { id: "gone", groupId: "custom:deleted", rules }     // its combined group no longer exists → dropped
+    ] });
+    assert.deepEqual(cfg.profiles.map(p => p.id), ["so", "elec", "cf"]);
+    assert.equal(profileKeyFor([{ id: "gElec" }], cfg, tree), "elec");       // sub-group beats its division; excluded from the combined group
+    assert.equal(profileKeyFor([{ id: "gCivil" }], cfg, tree), "cf");        // combined group beats the division it is built from
+    assert.equal(profileKeyFor([{ id: "gSo" }], cfg, tree), "cf");           // directly in SoCal, not Electric
+    assert.equal(profileKeyFor([{ id: "gNor" }], cfg, tree), "default");
+    assert.equal(profileKeyFor([{ id: "gCivil" }, { id: "gElec" }], cfg, tree), "elec");   // in an excluded group → not in the combined group
+    // a sub-group with its own weights still beats a combined group one level up
+    const cfg2 = normalizeConfig({ version: 2, rules, customGroups, profiles: [{ id: "cf", groupId: "custom:cf", rules }, { id: "civil", groupId: "gCivil", rules }] });
+    assert.equal(profileKeyFor([{ id: "gCivil" }], cfg2, tree), "civil");
+    assert.equal(profileKeyFor([{ id: "gFleet" }], cfg2, tree), "cf");
+    // The list offered in Settings mirrors the dashboard's locations, not the whole tree
+    const ilbGroups = [
+        { id: "GroupCompanyId", name: "Company Group", children: [{ id: "gAll" }, { id: "GroupVehicleId" }] },
+        { id: "GroupVehicleId", name: "Vehicle", children: [] },
+        { id: "gAll", name: "ALL ASSETS", children: [{ id: "gLoc" }, { id: "gTypes" }] },
+        { id: "gTypes", name: "Vehicle Types", children: [] },
+        { id: "gLoc", name: "Locations", children: [{ id: "gSo" }, { id: "gNor" }, { id: "gId" }] },
+        { id: "gId", name: "Idaho division", children: [] },
+        ...groups.filter(g => !["GroupCompanyId", "gLoc"].includes(g.id))
+    ];
+    const ilbTree = buildGroupTree(ilbGroups);
+    const flat = secs => secs.map(x => `${x.label}: ${x.items.map(i => i.label).join(", ")}`);
+    // anchored on Locations: the divisions, then the level above, then combined groups
+    assert.deepEqual(flat(profileGroupSections(normalizeConfig({ version: 2, rules, customGroups, displayGroupId: "gLoc" }), ilbTree)), [
+        "Locations: Idaho division, Northern California division, Southern California Division",
+        "ALL ASSETS: Locations, Vehicle Types",
+        "Combined groups: Civil + Fleet"
+    ]);
+    // anchored on one division: its sub-groups first, the divisions still listed
+    assert.deepEqual(flat(profileGroupSections(normalizeConfig({ version: 2, rules, displayGroupId: "gSo" }), ilbTree)), [
+        "Southern California Division: Fleet Shop, ILB Civil Underground, ILB Electric",
+        "Locations: Idaho division, Northern California division, Southern California Division"
+    ]);
+    // groups that already have their own weights drop out; no anchor → the top-level groups, no system groups
+    assert.deepEqual(flat(profileGroupSections(normalizeConfig({ version: 2, rules, displayGroupId: "gLoc", profiles: [{ id: "n", groupId: "gNor", rules }] }), ilbTree))[0],
+        "Locations: Idaho division, Southern California Division");
+    assert.deepEqual(flat(profileGroupSections(normalizeConfig({ version: 2, rules }), ilbTree)), ["Groups: ALL ASSETS"]);
+    assert.equal(profileGroupName("custom:cf", cfg, tree), "Civil + Fleet");
+    assert.equal(profileGroupName("gElec", cfg, tree), "ILB Electric");
+});
+
+test("volume-based scoring: one sensitivity, no ceiling per rule, total stops at 0", () => {
+    const base = { version: 2, period: "week", periods: 2, unit: "miles", minDistance: 10, rules: [
+        { id: "corner", name: "Harsh Cornering", weight: 10, maxRate: 40 },
+        { id: "phone", name: "Cell phone use", weight: 90, maxRate: 5 }
+    ] };
+    const capped = normalizeConfig(base);
+    const vol = normalizeConfig({ ...base, scoreMode: "volume", volumeZeroAt: 25 });
+    assert.equal(capped.scoreMode, "capped");
+    assert.equal(normalizeConfig({ ...base, scoreMode: "nonsense", volumeZeroAt: "x" }).volumeZeroAt, 25);
+    assert.equal(zeroAtFor(vol.rules[1], vol), 25);        // the per-rule value is ignored
+    assert.equal(zeroAtFor(capped.rules[1], capped), 5);
+    // 100 harsh corners in 1,000 mi (rate 100): capped loses the rule's 10 points and no more…
+    assert.ok(Math.abs(scoreFor({ corner: 100 }, mi(1000), capped) - 90) < 1e-9);
+    // …volume-based loses 10 × 100 ÷ 25 = 40
+    assert.ok(Math.abs(scoreFor({ corner: 100 }, mi(1000), vol) - 60) < 1e-9);
+    // below the sensitivity both are linear; volume uses the shared 25 instead of the rule's 40
+    assert.ok(Math.abs(scoreFor({ corner: 10 }, mi(1000), capped) - 97.5) < 1e-9);
+    assert.ok(Math.abs(scoreFor({ corner: 10 }, mi(1000), vol) - 96) < 1e-9);
+    // one event of each rule costs in proportion to the weights (90 : 10), whatever the rule
+    const lossPhone = 100 - scoreFor({ phone: 1 }, mi(1000), vol), lossCorner = 100 - scoreFor({ corner: 1 }, mi(1000), vol);
+    assert.ok(Math.abs(lossPhone / lossCorner - 9) < 1e-9);
+    // the total never goes below 0, and no events is still 100
+    assert.equal(scoreFor({ corner: 5000 }, mi(1000), vol), 0);
+    assert.equal(scoreFor({}, mi(1000), vol), 100);
+    // distance still matters: the same events over 10× the miles lose a tenth
+    assert.ok(Math.abs((100 - scoreFor({ corner: 100 }, mi(10000), vol)) - 4) < 1e-9);
+    // the breakdown shows the real loss (above the rule's weight) and the impacts add up to 100 − score
+    const P = buildPeriods(new Date(2026, 9, 15), "week", 2, 1);
+    const at = new Date(P[1].start + 3600000).toISOString();
+    const exceptions = Array.from({ length: 100 }, () => ({ activeFrom: at, device: { id: "d" }, rule: { id: "corner" } }));
+    const agg = aggregate({ periods: P, config: vol, exceptions, trips: [{ start: at, device: { id: "d" }, distance: mi(1000) }], deviceIds: new Set(["d"]) });
+    const br = ruleBreakdown(agg.byDevice.get("d"), vol, 1);
+    assert.ok(Math.abs(br.find(r => r.id === "corner").impact - 40) < 1e-9);
+    assert.ok(Math.abs(br.reduce((a, r) => a + r.impact, 0) - (100 - scoreAt(agg.byDevice.get("d"), 1, vol))) < 1e-9);
+    // a group total is the miles-weighted average of its vehicles (before the 0 floor): two trucks, one clean
+    const trips2 = [{ start: at, device: { id: "d" }, distance: mi(1000) }, { start: at, device: { id: "e" }, distance: mi(1000) }];
+    const agg2 = aggregate({ periods: P, config: vol, exceptions, trips: trips2, deviceIds: new Set(["d", "e"]) });
+    const both = sumSeries([agg2.byDevice.get("d"), agg2.byDevice.get("e")], 2);
+    assert.ok(Math.abs(scoreAt(both, 1, vol) - 80) < 1e-9);
+    // with a group's own weights the parts are averaged before the 0–100 limit
+    const volP = normalizeConfig({ ...base, scoreMode: "volume", volumeZeroAt: 25, profiles: [{ id: "n", groupId: "gN", rules: [{ id: "corner", weight: 50 }, { id: "phone", weight: 50 }] }] });
+    const agg3 = aggregate({ periods: P, config: volP, exceptions, trips: trips2, deviceIds: new Set(["d", "e"]), profileOf: new Map([["d", "n"], ["e", "default"]]) });
+    assert.equal(scoreAt(agg3.byDevice.get("d"), 1, volP), 0);                       // 50 × 100 ÷ 25 = 200 lost → 0
+    const both3 = sumSeries([agg3.byDevice.get("d"), agg3.byDevice.get("e")], 2);
+    assert.equal(scoreAt(both3, 1, volP), 0);                                        // (−100 + 100) ÷ 2 = 0
 });
 
 console.log(`\n${passed} tests passed`);
